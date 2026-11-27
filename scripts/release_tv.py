@@ -11,7 +11,7 @@ import zipfile
 import importlib.util
 from pathlib import Path
 
-REPOSITORY = 'N3urda/hongguoTV'
+REPOSITORY = 'kanonso/hongguoTV'
 PACKAGE = 'com.hongguotv.nativeapp'
 CERTIFICATE = '3579f7a8a91bbbc44688db60fb16a5561921784af23fa92f39b849086d76ca98'
 ROOT = Path(__file__).resolve().parents[1]
@@ -267,9 +267,148 @@ def publish(tag, local=False):
     print(f'Published {tag}: {data["apk"]["sha256"]}')
 
 
+
+def publish_candidate(tag):
+    """Create a verified signed GitHub Pre-release from the exact main commit."""
+    require(os.environ.get('GITHUB_REPOSITORY') == REPOSITORY and
+            os.environ.get('GITHUB_REF') == 'refs/heads/main',
+            'Signed candidates may only be created manually from canonical main')
+    require(os.environ.get('HONGGUOTV_KEYSTORE') and
+            os.environ.get('HONGGUOTV_STORE_PASSWORD') and
+            os.environ.get('HONGGUOTV_KEY_ALIAS') and
+            os.environ.get('HONGGUOTV_KEY_PASSWORD'),
+            'Original production signing material is required; no debug/new-key fallback is allowed')
+
+    data, files = prepare(tag)
+    commit = data['sourceCommit']
+    remote_refs = run('git', 'ls-remote', 'origin',
+                      f'refs/tags/{tag}', f'refs/tags/{tag}^{{}}')
+    if remote_refs:
+        remote = dict(line.split()[::-1] for line in remote_refs.splitlines())
+        remote_sha = remote.get(f'refs/tags/{tag}^{{}}', remote.get(f'refs/tags/{tag}'))
+        require(remote_sha == commit, 'Existing remote tag points to another commit; refusing to overwrite it')
+
+    pages = json.loads(run('gh', 'api', '--paginate', '--slurp',
+                           f'repos/{REPOSITORY}/releases?per_page=100'))
+    releases = [release for page in pages for release in page]
+    require(not any(release['tag_name'] == tag for release in releases),
+            'A Release already exists for this tag; candidate creation never overwrites Releases')
+
+    notes = ROOT / 'outputs/release-notes.md'
+    run('gh', 'release', 'create', tag, '--repo', REPOSITORY,
+        '--target', commit, '--draft', '--prerelease',
+        '--title', f'红果 TV {data["versionName"]} · 实机候选版',
+        '--notes-file', str(notes))
+    run('gh', 'release', 'upload', tag, '--repo', REPOSITORY, *map(str, files))
+
+    draft = release_including_draft(tag)
+    require(draft['draft'] and draft['prerelease'],
+            'Candidate must remain a draft pre-release until all assets are verified')
+    verify_assets(draft['assets'], files)
+    run('gh', 'release', 'edit', tag, '--repo', REPOSITORY,
+        '--draft=false', '--prerelease=true', '--notes-file', str(notes))
+
+    result = api('releases/tags/' + tag)
+    require(not result['draft'] and result['prerelease'],
+            'Verified candidate was not published as a Pre-release')
+    verify_assets(result['assets'], files)
+    print(f'Published signed Pre-release candidate {tag}; source {commit}')
+
+
+def promote_candidate(tag):
+    """Promote the already-tested Pre-release without rebuilding or replacing assets."""
+    require(os.environ.get('GITHUB_REPOSITORY') == REPOSITORY and
+            os.environ.get('GITHUB_REF') == 'refs/heads/main' and
+            os.environ.get('RELEASE_TAG') == tag,
+            'Promotion must be a manual production workflow in the canonical repository')
+    version = version_tuple(tag)
+    release = api('releases/tags/' + tag)
+    require(not release['draft'] and release['prerelease'],
+            'Only an already-published Pre-release candidate can be promoted')
+
+    version_text = tag.removeprefix('kotlin-v')
+    expected = {
+        f'hongguotv-kotlin-{version_text}-android5.apk',
+        f'hongguotv-kotlin-{version_text}-android6.apk',
+        f'hongguotv-kotlin-{version_text}-android6-arm32-v7a.apk',
+        f'hongguotv-kotlin-{version_text}-android6-arm64-v8a.apk',
+        f'hongguotv-{tag}-source.zip',
+        'update.json',
+        'SHA256SUMS',
+    }
+    assets = release.get('assets', [])
+    require({asset['name'] for asset in assets} == expected,
+            'Candidate asset set is incomplete or contains unexpected files')
+    require(all(asset.get('state') == 'uploaded' and asset.get('size', 0) > 0
+                and re.fullmatch(r'sha256:[0-9a-f]{64}', asset.get('digest', ''))
+                for asset in assets),
+            'Candidate contains an unverified or incomplete uploaded asset')
+
+    sums_text = run('gh', 'release', 'download', tag, '--repo', REPOSITORY,
+                    '--pattern', 'SHA256SUMS', '--output', '-')
+    checksums = {}
+    for line in sums_text.splitlines():
+        match = re.fullmatch(r'([0-9a-f]{64})  (.+)', line)
+        require(match is not None, 'Malformed SHA256SUMS in candidate Release')
+        require(match[2] not in checksums, 'Duplicate entry in SHA256SUMS')
+        checksums[match[2]] = match[1]
+    require(set(checksums) == expected - {'SHA256SUMS'},
+            'SHA256SUMS does not cover exactly the candidate payload assets')
+    for asset in assets:
+        if asset['name'] == 'SHA256SUMS':
+            continue
+        require(asset['digest'] == 'sha256:' + checksums[asset['name']],
+                f'GitHub asset digest differs from SHA256SUMS: {asset["name"]}')
+
+    update = json.loads(run('gh', 'release', 'download', tag, '--repo', REPOSITORY,
+                            '--pattern', 'update.json', '--output', '-'))
+    require(update.get('schema') == 1 and update.get('packageName') == PACKAGE
+            and update.get('tag') == tag and update.get('versionName') == '.'.join(map(str, version))
+            and update.get('versionCode', 0) > 0,
+            'Candidate update.json does not match its Release tag/package/version')
+    require(update.get('apk', {}).get('name') == f'hongguotv-kotlin-{version_text}-android5.apk'
+            and update.get('platformApk', {}).get('name') == f'hongguotv-kotlin-{version_text}-android6.apk',
+            'Candidate update.json references an absent or unexpected APK asset')
+    require(re.fullmatch(r'[0-9a-f]{40}', update.get('sourceCommit', '')) is not None,
+            'Candidate source commit is missing or malformed')
+
+    tag_ref = api('git/ref/tags/' + tag)
+    target = tag_ref['object']
+    if target['type'] == 'tag':
+        target = api('git/tags/' + target['sha'])['object']
+    require(target['type'] == 'commit' and target['sha'] == update['sourceCommit'],
+            'Release tag does not point to the source commit in update.json')
+
+    pages = json.loads(run('gh', 'api', '--paginate', '--slurp',
+                           f'repos/{REPOSITORY}/releases?per_page=100'))
+    published = [item for page in pages for item in page
+                 if not item['draft'] and not item['prerelease'] and
+                 item['tag_name'].startswith('kotlin-v') and item['tag_name'] != tag]
+    for item in published:
+        require(version_tuple(item['tag_name']) < version,
+                'A newer/equal stable Release exists; refusing to move Latest backwards')
+    if published:
+        latest = api('releases/latest')
+        require(released_native_version(latest['tag_name']) < version,
+                'Candidate is not newer than the current Latest release')
+        old = json.loads(run('gh', 'release', 'download', latest['tag_name'],
+                             '--repo', REPOSITORY, '--pattern', 'update.json', '--output', '-'))
+        require(update['versionCode'] > old['versionCode'],
+                'Candidate versionCode must exceed the current Latest Release')
+
+    # Metadata-only promotion: the already-tested files are not rebuilt or replaced.
+    run('gh', 'release', 'edit', tag, '--repo', REPOSITORY,
+        '--prerelease=false', '--latest=true')
+    stable = api('releases/tags/' + tag)
+    require(not stable['draft'] and not stable['prerelease'],
+            'Candidate did not become a stable Release')
+    require(api('releases/latest')['tag_name'] == tag,
+            'Promoted Release is not marked Latest')
+    print(f'Promoted {tag} to Latest without rebuilding or replacing APK assets')
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['validate', 'prepare', 'publish'])
+    parser.add_argument('action', choices=['validate', 'prepare', 'publish', 'candidate', 'promote'])
     parser.add_argument('tag')
     parser.add_argument('--local', action='store_true', help='Publish verified remote main/tag using local signing and gh authentication')
     args = parser.parse_args()
@@ -277,6 +416,10 @@ def main():
         print(source_version((ROOT / 'kotlin-tv/app/build.gradle.kts').read_text(), args.tag))
     elif args.action == 'prepare':
         prepare(args.tag)
+    elif args.action == 'candidate':
+        publish_candidate(args.tag)
+    elif args.action == 'promote':
+        promote_candidate(args.tag)
     else:
         publish(args.tag, local=args.local)
 
