@@ -65,7 +65,7 @@ jobs:
           VERSION="$(python3 - <<'PY'
 import re
 text = open('kotlin-tv/app/build.gradle.kts', encoding='utf-8').read()
-print(re.search(r'versionName\\s*=.*?:\\s*"([^"]+)"', text).group(1))
+print(re.search(r'versionName\s*=.*?:\s*"([^"]+)"', text).group(1))
 PY
           )"
           TAG="kotlin-v$VERSION"
