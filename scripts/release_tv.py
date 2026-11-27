@@ -280,6 +280,8 @@ def publish_candidate(tag):
             'Original production signing material is required; no debug/new-key fallback is allowed')
 
     data, files = prepare(tag)
+    require(data['versionCode'] > 41,
+            'The first kanonso migration candidate must have versionCode greater than the current 0.16.20 / 41 build')
     commit = data['sourceCommit']
     remote_refs = run('git', 'ls-remote', 'origin',
                       f'refs/tags/{tag}', f'refs/tags/{tag}^{{}}')

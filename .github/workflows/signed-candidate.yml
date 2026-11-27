@@ -62,7 +62,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="$(sed -n 's/.*versionName = .*?: "\\([^"]*\\)".*/\\1/p' kotlin-tv/app/build.gradle.kts)"
+          VERSION="$(python3 - <<'PY'
+import re
+text = open('kotlin-tv/app/build.gradle.kts', encoding='utf-8').read()
+print(re.search(r'versionName\\s*=.*?:\\s*"([^"]+)"', text).group(1))
+PY
+          )"
           TAG="kotlin-v$VERSION"
           if git show-ref --verify --quiet "refs/tags/$TAG"; then
             test "$(git rev-list -n 1 "$TAG")" = "$GITHUB_SHA" || {

@@ -181,13 +181,28 @@ class ReleaseContractTest(unittest.TestCase):
         signed_candidate = (ROOT / '.github/workflows/signed-candidate.yml').read_text()
         self.assertIn("scripts/release_tv.py candidate", signed_candidate)
         self.assertIn("refs/heads/main", signed_candidate)
-        self.assertIn('bash scripts/build-kotlin.sh', workflow)
+        self.assertIn('bash scripts/build-kotlin.sh', signed_candidate)
         self.assertIn('for legacy in true false', (ROOT / 'scripts/build-kotlin.sh').read_text())
         self.assertIn('-PlegacyAudio=', (ROOT / 'scripts/build-kotlin.sh').read_text())
-        self.assertIn('cancel-in-progress: false', workflow)
+        self.assertIn('cancel-in-progress: false', signed_candidate)
         for name in ['KEYSTORE_B64', 'STORE_PASSWORD', 'KEY_ALIAS', 'KEY_PASSWORD']:
-            self.assertIn('secrets.HONGGUOTV_' + name, workflow)
+            self.assertIn('secrets.HONGGUOTV_' + name, signed_candidate)
         self.assertFalse((ROOT / '.github/workflows/kotlin-public-sync.yml').exists())
+
+    def test_signed_candidate_requires_original_key_before_building(self):
+        env = dict(GITHUB_REPOSITORY=r.REPOSITORY, GITHUB_REF='refs/heads/main')
+        with patch.dict(r.os.environ, env, clear=True), patch.object(r, 'prepare') as prepare:
+            with self.assertRaisesRegex(ValueError, 'Original production signing material'):
+                r.publish_candidate(self.tag)
+            prepare.assert_not_called()
+
+    def test_promotion_requires_manual_production_context(self):
+        env = dict(GITHUB_REPOSITORY=r.REPOSITORY, GITHUB_REF='refs/heads/main',
+                   RELEASE_TAG='kotlin-v0.9.9')
+        with patch.dict(r.os.environ, env, clear=True), patch.object(r, 'api') as api:
+            with self.assertRaisesRegex(ValueError, 'manual production workflow'):
+                r.promote_candidate(self.tag)
+            api.assert_not_called()
 
     def test_latest_preview_version_is_compared_without_loosening_release_tags(self):
         self.assertEqual((0, 10, 1), r.released_native_version('preview-v0.10.1-20261111'))
