@@ -14,7 +14,7 @@
 - **使用边界**：使用者应遵守适用法律法规、平台服务条款及权利人的授权要求。请勿利用本项目绕过付费、访问权限或其他保护措施，也不得用于未经授权的内容下载、复制、传播、商业经营或其他侵权行为。“学习研究”不代表可以免除相关义务与责任。
 - **服务与账号风险**：第三方接口可能随时变更、限制或停止服务，本项目不保证内容的准确性、完整性、可用性及持续维护。使用非官方客户端可能出现播放失败、数据同步异常或账号访问受限，请自行评估后使用。
 - **责任范围**：本项目按现状提供，不作额外保证。在适用法律允许的范围内，开发者不对因使用或无法使用本项目造成的损失承担责任；本声明不排除或限制依法不能免除的责任。
-- **权利反馈**：如权利人认为本项目涉及侵权或不当使用，请通过 [Issue](https://github.com/N3urda/hongguoTV/issues) 提供相关说明和权属依据，维护者将在核实后及时处理，包括移除相关内容或停用相关功能。请勿在公开反馈中提交账号凭据或其他敏感信息。
+- **权利反馈**：如权利人认为本项目涉及侵权或不当使用，请通过 [Issue](https://github.com/kanonso/hongguoTV/issues) 提供相关说明和权属依据，维护者将在核实后及时处理，包括移除相关内容或停用相关功能。请勿在公开反馈中提交账号凭据或其他敏感信息。
 
 ## 功能
 
@@ -26,7 +26,7 @@
 
 ## 下载与兼容
 
-[发布版本](https://github.com/N3urda/hongguoTV/releases) · [构建说明](kotlin-tv/README.md) · [更新与发布](kotlin-tv/AUTO_UPDATES.md)
+[发布版本](https://github.com/kanonso/hongguoTV/releases) · [构建说明](kotlin-tv/README.md) · [更新与发布](kotlin-tv/AUTO_UPDATES.md)
 
 本次功能集成保留包名 `com.hongguotv.nativeapp`、原签名配置和主线 Android 5.0（API 21）兼容目标。具体测试结果见 [集成记录](kotlin-tv/MAIN_INTEGRATION.md)，最低 SDK 配置不代表所有实体电视已验收。开发签名预览包不能覆盖原签名包，请勿为更新先卸载。
 
@@ -34,7 +34,7 @@
 
 ## 反馈与贡献
 
-欢迎大家在使用过程中提出问题、分享建议，一起让项目变得更好。如果遇到使用问题，或有希望增加的功能，可以直接提交 [Issue](https://github.com/N3urda/hongguoTV/issues)；也欢迎通过 [Pull Request](https://github.com/N3urda/hongguoTV/pulls) 贡献修复和改进。
+欢迎大家在使用过程中提出问题、分享建议，一起让项目变得更好。如果遇到使用问题，或有希望增加的功能，可以直接提交 [Issue](https://github.com/kanonso/hongguoTV/issues)；也欢迎通过 [Pull Request](https://github.com/kanonso/hongguoTV/pulls) 贡献修复和改进。
 
 我们会认真阅读并评估每一份反馈与贡献，结合项目定位、实际需求和维护成本，逐步安排修复、完善功能，或审阅并合并合适的代码改动。
 
@@ -48,6 +48,6 @@
 ./scripts/build-kotlin.sh
 ```
 
-公开仓库标准 GitHub Actions 构建继续保留；本地测试与构建也可独立执行。正式发布在用户合并 PR 后进行，不把测试包当成已发布版本。
+kanonso/hongguoTV 是唯一正式發布倉庫。Debug 候選包透過 Actions Artifact 供實機測試；找回並驗證原簽名後，才建立 kanonso Pre-release。實機通過後由 production 人工批准，把同一批已驗收附件提升為 Latest。
 
 本项目与红果官方无关联，平台接口变化可能导致功能失效。代码采用 GPL-3.0，来源与依赖说明见 [NOTICE](kotlin-tv/NOTICE.md)。`android/`、`ios/`、`src/`、`server/` 保留旧实现，原生 APK 不依赖这些目录。

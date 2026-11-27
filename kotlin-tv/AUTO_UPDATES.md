@@ -1,7 +1,6 @@
 # 发布与自动更新
 
-唯一发布渠道为 N3urda/hongguoTV Releases。main/PR 验证不会发布；仅
-`kotlin-vMAJOR.MINOR.PATCH` 标签触发正式发布，标签必须匹配源码 versionName。
+唯一正式发布仓库为 kanonso/hongguoTV。Debug 候选版只作为 Actions Artifact；找回原签名后，手动执行 signed-candidate 工作流程建立 Pre-release，实机测试通过后由 production 人工批准并提升同一组附件为 Latest。标签创建本身不会触发正式发布。
 发布前递增 versionCode、提交改动并完成评审。已发布资产不可变；更正安装包布局必须递增补丁版本和 versionCode，禁止重开旧 Release、覆盖旧附件或移动旧标签。
 
 ## 强制发布清单（0.16.4 起）
@@ -67,3 +66,10 @@ ghfast.top 和 gh-proxy.org。也可以固定其中一条线路，应用会记�
 2. 只从与远程 main 一致的干净检出发布；版本号与标签一致。SHA256SUMS 必须覆盖四包、源码及 update.json。
 3. 发布说明分别列出 Android 5、Android 6+ ARM32、ARM64 和通用包的用途，明确旧客户端更新迁移行为及未覆盖的设备测试。
 4. 发布后回读附件数量、大小、SHA256、update.json 和 latest；保留旧版附件及校验值，不覆盖已发布版本。
+
+
+## 簽名恢復與候選發布
+
+四個原始簽名 Secrets 必須已設定，且 Keystore 憑證 SHA-256 必須符合原證書；不得以新金鑰替代正式簽名。Debug APK 使用不同 application ID，僅供並行測試。
+
+詳細找回、Debug Artifact 下載、簽名 Pre-release、實機驗收及正式批准步驟，請見 [簽名恢復與發布流程](../docs/SIGNING_RECOVERY_AND_RELEASE.md)。
