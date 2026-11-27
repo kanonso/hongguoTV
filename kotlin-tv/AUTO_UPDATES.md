@@ -57,8 +57,7 @@ ghfast.top 和 gh-proxy.org。也可以固定其中一条线路，应用会记�
 由 Android 系统确认安装。issue #55 的真机崩溃尚未复现，移除 FFmpeg 是隔离措施，
 构建和打包检查不能替代问题设备回测。
 
-本地发布需干净工作区且 main/tag/HEAD 一致，再执行
-`python3 scripts/release_tv.py publish kotlin-vX.Y.Z --local`。没有明确发布指令时不执行。
+正式發布只能走 signed Pre-release 與 production promotion 工作流程；不使用 tag push 自動發布，也不在未經實機驗收時直接執行穩定版發布腳本。
 
 ## 发布前后检查清单
 

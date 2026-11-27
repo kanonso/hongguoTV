@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: debug-candidate-\${{ github.event.pull_request.number || github.ref }}
+  group: debug-candidate-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -46,7 +46,7 @@ jobs:
         run: cat outputs/debug-candidate/TEST-REPORT.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: hongguotv-debug-candidate-\${{ github.run_number }}-\${{ github.sha }}
+          name: hongguotv-debug-candidate-${{ github.run_number }}-${{ github.sha }}
           path: outputs/debug-candidate/
           if-no-files-found: error
           retention-days: 30

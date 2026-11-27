@@ -24,8 +24,6 @@ jobs:
           ref: main
       - name: Verify tested candidate assets and promote the exact same APKs
         env:
-          GH_TOKEN: \${{ github.token }}
-          GITHUB_REPOSITORY: \${{ github.repository }}
-          GITHUB_REF: \${{ github.ref }}
-          RELEASE_TAG: \${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
         run: python3 scripts/release_tv.py promote "$RELEASE_TAG"
