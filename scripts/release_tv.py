@@ -165,7 +165,7 @@ def prepare_apks(version, code, sdk, out):
                 and matches[0].get('versionCode') == code and matches[0].get('versionName') == version,
                 'Mismatched current build output')
     # Check every package before copying any release assets or creating a draft.
-    for path, _, abis in sources:
+    for path, suffix, abis in sources:
         min_sdk = 21 if suffix == 'android5' else 23
         validate_apk(run(str(buildtools / 'aapt'), 'dump', 'badging', str(path)),
                      run(str(buildtools / 'apksigner'), 'verify', '--verbose', '--min-sdk-version',
