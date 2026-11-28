@@ -9,8 +9,10 @@ import android.content.Intent
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import androidx.media3.common.util.UnstableApi
 
 /** Long-running downloads explicitly started by the viewer, managed by Android JobScheduler. */
+@UnstableApi
 internal class TvDownloadTransferJobService : JobService() {
     private val main = Handler(Looper.getMainLooper())
     private var manager: TvDownloadManager? = null

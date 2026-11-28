@@ -6,8 +6,10 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import androidx.media3.common.util.UnstableApi
 
 /** Compatibility runner for Android 6–13; Android 14+ uses UIDT jobs. */
+@UnstableApi
 internal class TvDownloadLegacyForegroundService : Service() {
     private var manager: TvDownloadManager? = null
     private var stopObserving: (() -> Unit)? = null
