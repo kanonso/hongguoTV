@@ -183,11 +183,11 @@ class SearchPayloadTest {
     }
 
     @Test fun providerAwareCatalogMergeKeepsDistinctIDsAndSeasonsWithoutIDCrossMapping() {
-        val primary = CatalogPage(listOf(Series("123456", "目标作品第五季")))
+        val primary = CatalogPage(listOf(Series("123456", "目标作品第五季")), hasMore = false)
         val community = CatalogPage(listOf(
             Series("123456", "目标作品第五季", source = "openhongguo"),
             Series("654321", "目标作品第四季", source = "openhongguo"),
-        ))
+        ), hasMore = false)
         val merged = CatalogSearchMerge.merge(primary, community, "目标作品第五季")
         assertEquals(listOf("hongguo", "openhongguo", "openhongguo"), merged.items.map { it.source })
         assertEquals(listOf("123456", "123456", "654321"), merged.items.map { it.id })
