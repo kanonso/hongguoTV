@@ -5313,11 +5313,13 @@ class MainActivity : Activity() {
     }
 
     private fun offerNextSeason(current: Detail) {
+        // Community episode IDs belong to openhongguo; never send them to Hongguo's related API.
+        if (current.series.source != "hongguo") return
         if (!library.seasonAutoplay || !library.autoNext || seasonSuppressed || seasonPending || !foreground) return
         seasonPending = true
         val token = ++seasonGeneration
         work({ RelatedWorks.nextSeason(current.series, repository.related(current.series.id)) }, { next ->
-            if (token != seasonGeneration || !foreground || detail?.series?.id != current.series.id) return@work
+            if (token != seasonGeneration || !foreground || detail?.series?.libraryKey != current.series.libraryKey) return@work
             nextSeasonWork = next
             if (next != null) {
                 val banner = text("本季结束后播放《${next.series.title}》 · 取消请按菜单键，或确认打开菜单", 13f).apply {
@@ -5337,8 +5339,9 @@ class MainActivity : Activity() {
 
     private fun finishSeason(current: Detail) {
         val next = nextSeasonWork ?: return
-        if (!foreground || seasonSuppressed || !library.seasonAutoplay || !library.autoNext ||
-            sleepStopped || pausedForLifecycle || detail?.series?.id != current.series.id) return
+        if (current.series.source != "hongguo" || next.series.source != current.series.source ||
+            !foreground || seasonSuppressed || !library.seasonAutoplay || !library.autoNext ||
+            sleepStopped || pausedForLifecycle || detail?.series?.libraryKey != current.series.libraryKey) return
         val token = seasonGeneration
         playbackText.text = "正在加载下一季…"
         work({ repository.detail(next.series.id) }, { result ->
