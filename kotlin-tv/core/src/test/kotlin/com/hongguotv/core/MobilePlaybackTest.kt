@@ -318,6 +318,109 @@ class MobilePlaybackTest {
         assertEquals(listOf("POST", "POST"), requests.map { it.method })
     }
 
+    @Test
+    fun signedPolicyVideoTabUsesVerifiedRouteUrlValuesHeadersAndField21() {
+        var signedUrl = ""
+        var observedField21: Int? = null
+        val route = PlaybackStrategyRoute(
+            id = "video_tab",
+            enabled = true,
+            order = 20,
+            auth = "v5",
+            url = "https://api5-normal-sinfonlineb.fqnovel.com/reading/bookapi/video_tab/multi_video_model/v1/",
+            values = mapOf("version_code" to "74332", "version_name" to "7.4.3.32"),
+            body = emptyMap(),
+            headers = mapOf("user-agent" to "policy-agent", "accept" to "application/policy+json"),
+            field21 = 312,
+        )
+        val signing = object : MobilePlaybackSigner {
+            override fun sign(url: String, body: ByteArray, device: Map<String, String>) =
+                MobileSignedRequest(url, emptyMap())
+
+            override fun signWithField21(
+                url: String,
+                body: ByteArray,
+                device: Map<String, String>,
+                field21: Int?,
+            ): MobileSignedRequest {
+                signedUrl = url
+                observedField21 = field21
+                assertTrue(body.isEmpty())
+                assertEquals("123456", device["device_id"])
+                return MobileSignedRequest(url, mapOf("X-Medusa" to "test-signature"))
+            }
+        }
+
+        val request = MobilePlayback.videoTabRequest(
+            id = "123",
+            device = device,
+            host = "ignored.example",
+            now = 1_000L,
+            signing = signing,
+            strategyRoute = route,
+        ).build()
+
+        assertEquals(312, observedField21)
+        assertEquals(signedUrl, request.url.toString())
+        assertEquals("api5-normal-sinfonlineb.fqnovel.com", request.url.host)
+        assertEquals("74332", request.url.queryParameter("version_code"))
+        assertEquals("7.4.3.32", request.url.queryParameter("version_name"))
+        assertEquals("123", request.url.queryParameter("video_id"))
+        assertEquals("policy-agent", request.header("User-Agent"))
+        assertEquals("application/policy+json", request.header("Accept"))
+        assertEquals("test-signature", request.header("X-Medusa"))
+        assertEquals("GET", request.method)
+        assertNull(request.body)
+    }
+
+    @Test
+    fun signedPolicyBodyOverridesOperateOnNestedJsonWithoutReplacingOtherFields() {
+        val route = PlaybackStrategyRoute(
+            id = "preload_current",
+            enabled = true,
+            order = 10,
+            auth = "v5",
+            url = "https://reading.snssdk.com/novel/player/multi_video_model/preload/v1",
+            values = emptyMap(),
+            body = mapOf(
+                "biz_param.device_level" to 2,
+                "biz_param.video_platform" to 1024,
+                "dr_scene" to "preload",
+            ),
+            headers = emptyMap(),
+            field21 = 312,
+        )
+        val original = """{"biz_param":{"device_level":4,"need_all_video_definition":true},"dr_scene":"player","mixed_video_id_map":{"1004":["123"]}}"""
+        val updated = JSONObject(String(route.applyBodyOverrides(original.toByteArray())!!))
+        assertEquals(2, updated.getJSONObject("biz_param").getInt("device_level"))
+        assertEquals(1024, updated.getJSONObject("biz_param").getInt("video_platform"))
+        assertTrue(updated.getJSONObject("biz_param").getBoolean("need_all_video_definition"))
+        assertEquals("preload", updated.getString("dr_scene"))
+        assertEquals("123", updated.getJSONObject("mixed_video_id_map").getJSONArray("1004").getString(0))
+    }
+
+    @Test
+    fun signedPolicyMergeChangesVersionButKeepsDeviceIdentity() {
+        val route = PlaybackStrategyRoute(
+            id = "model_0",
+            enabled = true,
+            order = 50,
+            auth = "v5",
+            url = "https://api5-normal-sinfonlinea.fqnovel.com/novel/player/video_model/v1/",
+            values = mapOf("version_code" to "74332", "version_name" to "7.4.3.32"),
+            body = emptyMap(),
+            headers = emptyMap(),
+            field21 = null,
+        )
+        val merged = route.mergeQueryValues(
+            mapOf("device_id" to "123456", "iid" to "654321", "version_code" to "73932"),
+        )
+        assertEquals("123456", merged["device_id"])
+        assertEquals("654321", merged["iid"])
+        assertEquals("74332", merged["version_code"])
+        assertEquals("7.4.3.32", merged["version_name"])
+    }
+
     private fun repositoryWithModels(
         mobile: String,
         tab: String = model(),
