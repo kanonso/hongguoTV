@@ -2717,7 +2717,7 @@ class MainActivity : Activity() {
      * If either provider fails, preserve the other provider's results and pagination.
      */
     private fun searchAllWithCommunity(query: String, requestedPage: Int): CatalogPage {
-        val primary = runCatching { repository.searchAll(query, requestedPage) }
+        val primary = runCatching { repository.search(query, requestedPage, ContentType.SHORT) }
         val community = runCatching { openHongguoAdapter.search(query, requestedPage) }
         if (primary.isFailure && community.isFailure) {
             throw java.io.IOException("红果搜索来源暂时都不可用，请稍后重试", primary.exceptionOrNull())
