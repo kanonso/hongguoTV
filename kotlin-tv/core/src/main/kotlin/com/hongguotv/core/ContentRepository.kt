@@ -416,7 +416,7 @@ constructor(
         val profile = identity.values.filterKeys { it in allowed } + mapOf(
             "version_code" to "73532", "version_name" to "7.3.5.32", "manifest_version_code" to "73532",
             "update_version_code" to "73532", "_rticket" to now.toString())
-        val payload = """{"biz_param":{"need_all_video_definition":true,"video_platform":3},"content_type":1,"video_id":"$id"}""".toByteArray()
+        val payload = """{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"from_video_id":"","need_all_video_definition":true,"need_mp4_align":false,"source":9,"use_os_player":false,"use_server_dns":false,"video_platform":3},"content_type":1,"video_id":"$id"}""".toByteArray()
         val request = if (strategyRoute != null) {
             strategyRequest(
                 strategyRoute,
@@ -1364,11 +1364,11 @@ constructor(
                         }
                         return playbackSession.profile(transport())
                     }
-                    val shouldRefresh = !speculative && (synchronized(playbackIdentityLock) {
+                    val signedPolicy = playbackStrategy()
+                    val shouldRefresh = signedPolicy == null && !speculative && (synchronized(playbackIdentityLock) {
                         emptyPlaybackRounds >= IDENTITY_ROTATE_ROUNDS
                     } || previousIdentity.routes.exhausted(clock()))
                     var identity = if (shouldRefresh) refreshIdentity(previousIdentity) else previousIdentity
-                    val signedPolicy = playbackStrategy()
                     val routeIds = setOf("model_0", "model_1", "player_b", "player_a", "legacy")
                     data class PlannedRoute(val transport: PlaybackRoutes.Route, val policy: PlaybackStrategyRoute?)
                     val plannedRoutes: List<PlannedRoute> = if (signedPolicy != null) {
