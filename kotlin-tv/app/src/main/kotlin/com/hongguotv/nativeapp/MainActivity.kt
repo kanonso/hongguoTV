@@ -1222,7 +1222,7 @@ class MainActivity : Activity() {
                     restoreProgress = library::progress,
                     saveProgress = { progress, count, force ->
                         library.save(progress)
-                        cloudAccount.upload(CloudProgress(progress.series, progress.episodeId,
+                        if (progress.series.source == "hongguo") cloudAccount.upload(CloudProgress(progress.series, progress.episodeId,
                             progress.episodeIndex, progress.position, progress.duration, progress.updatedAt),
                             count, force || progress.completed || !foreground)
                     },
@@ -2077,7 +2077,7 @@ class MainActivity : Activity() {
                 .firstOrNull { it.series.id == series.id }
                 ?.let(::reservationDescription)
                 .orEmpty()
-        if (isHistory() && mergedCloudProgress(series.id) != null)
+        if (series.source == "hongguo" && isHistory() && mergedCloudProgress(series.id) != null)
             return mergedCloudProgress(series.id)
                 ?.let { "账号进度 · 第 ${it.episodeIndex+1} 集 · ${formatTime(it.position)}" }
                 .orEmpty()
@@ -2296,7 +2296,7 @@ class MainActivity : Activity() {
                         series.id,
                         !added && (isFavorites() || collection == "updates"),
                     )
-                    if (added) favoriteMonitor.check()
+                    if (added && series.source == "hongguo") favoriteMonitor.check()
                 }
         actions += "查看完整标题" to { tvTools.info("完整标题", series.title, anchor) }
         if (isHistory() && library.progress(series) != null) actions += "管理本机观看记录" to { manageHistory(series, anchor) }
