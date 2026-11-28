@@ -196,6 +196,7 @@ constructor(
     private val clock: () -> Long = System::currentTimeMillis,
     private val playbackSession: PlaybackDeviceSession = PlaybackDeviceSession(),
     private val sleep: (Long) -> Unit = Thread::sleep,
+    private val playbackStrategy: () -> PlaybackStrategyPolicy? = { null },
 ) {
     // 签名时钟与应用时钟同源：测试可注入，重签后的 ts/_rticket 保持在同一时间基上。
     private val signer = Signer(clock)
