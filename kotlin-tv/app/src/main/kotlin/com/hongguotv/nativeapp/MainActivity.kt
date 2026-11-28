@@ -25,6 +25,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.ui.PlayerView
+import androidx.media3.transformer.*
 import com.hongguotv.core.*
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -86,6 +87,7 @@ class MainActivity : Activity() {
     private val downloadManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         TvDownloadRuntime.get(applicationContext, schedulePending = true)
     }
+    private var activeSeasonMerge: Transformer? = null
 
     private val openHongguoAdapter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         OpenHongguoAdapter(applicationContext)
@@ -2684,16 +2686,45 @@ class MainActivity : Activity() {
     }
 
     private fun playDownloadedTask(task: TvDownloadTask) {
-        if (task.mediaFormat == "hls") {
+        val completed = downloadManager.snapshot()
+            .filter { it.seriesId == task.seriesId && it.status == TvDownloadStatus.COMPLETED }
+            .sortedBy { it.episodeNumber }
+        val factory = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(
+            androidx.media3.datasource.DefaultDataSource.Factory(this),
+        )
+        val playable = mutableListOf<Pair<TvDownloadTask, androidx.media3.exoplayer.source.MediaSource>>()
+        completed.forEach { candidate ->
             val source = runCatching {
-                TvDownloadRuntime.createHlsMediaSource(applicationContext, task.id, task.mediaUri)
-            }.getOrElse {
-                tvTools.info("本机播放", "HLS 离線快取無法讀取，請重新下載。", root)
-                return
-            }
-            playDownloadedMediaSource(task.seriesTitle) { player -> player.setMediaSource(source) }
-        } else {
-            playDownloadedFile(task.filePath, task.seriesTitle)
+                if (candidate.mediaFormat == "hls") {
+                    TvDownloadRuntime.createHlsMediaSource(applicationContext, candidate.id, candidate.mediaUri)
+                } else {
+                    val file = java.io.File(candidate.filePath)
+                    check(file.isFile && file.canRead()) { "下载文件不存在" }
+                    val item = MediaItem.Builder()
+                        .setMediaId("download-${candidate.id}")
+                        .setUri(android.net.Uri.fromFile(file))
+                        .setMediaMetadata(
+                            MediaMetadata.Builder()
+                                .setTitle("${candidate.seriesTitle} · 第 ${candidate.episodeNumber} 集")
+                                .build(),
+                        )
+                        .build()
+                    factory.createMediaSource(item)
+                }
+            }.onFailure {
+                android.util.Log.w("HongguoTV", "Skip unavailable downloaded episode ${candidate.episodeNumber}", it)
+            }.getOrNull()
+            if (source != null) playable += candidate to source
+        }
+        val startIndex = playable.indexOfFirst { it.first.id == task.id }
+        if (startIndex < 0) {
+            tvTools.info("本机播放", "下载文件不存在或离线媒体无法读取。", root)
+            return
+        }
+        val mediaSources = playable.map { it.second }
+        playDownloadedMediaSource("${task.seriesTitle} · 已下载 ${playable.size} 集") { player ->
+            // ExoPlayer's playlist advances to the next available downloaded episode automatically.
+            player.setMediaSources(mediaSources, startIndex, 0L)
         }
     }
 
@@ -2740,85 +2771,315 @@ class MainActivity : Activity() {
         Toast.makeText(this, "本机播放：$title", Toast.LENGTH_SHORT).show()
     }
 
+    private fun showDownloadRangeDialog(data: Detail, anchor: View? = null) {
+        val total = data.episodes.size
+        if (total <= 0) {
+            tvTools.info("下载选集", "这部剧暂时没有可下载的集数。", anchor)
+            return
+        }
+        val start = (episodeIndex + 1).coerceIn(1, total)
+        val fromPicker = NumberPicker(this).apply {
+            minValue = 1
+            maxValue = total
+            value = start
+            wrapSelectorWheel = false
+            descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+        }
+        val toPicker = NumberPicker(this).apply {
+            minValue = 1
+            maxValue = total
+            value = start
+            wrapSelectorWheel = false
+            descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+        }
+        fromPicker.setOnValueChangedListener { _, _, value ->
+            if (toPicker.value < value) toPicker.value = value
+        }
+        toPicker.setOnValueChangedListener { _, _, value ->
+            if (fromPicker.value > value) fromPicker.value = value
+        }
+        val fromColumn = column().apply {
+            addView(text("从第几集开始", 13f, muted))
+            addView(fromPicker, lp(dp(112), dp(112)))
+        }
+        val toColumn = column().apply {
+            addView(text("到第几集结束", 13f, muted))
+            addView(toPicker, lp(dp(112), dp(112)))
+        }
+        val content = row().apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(12), dp(16), dp(8))
+            addView(fromColumn, lp(0, -2).apply { weight = 1f })
+            addView(toColumn, lp(0, -2).apply { weight = 1f })
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("选择下载集数 · 共 $total 集")
+            .setView(content)
+            .setPositiveButton("下载所选范围", null)
+            .setNeutralButton("全部下载 $total 集") { _, _ ->
+                downloadManager.enqueueAll(
+                    data.series.id, data.series.title, data.episodes,
+                    source = data.series.source, episodeCount = total,
+                    maxQuality = library.maxQuality, startNumber = 1,
+                )
+                showDownloadManager(anchor)
+            }
+            .setNegativeButton("取消", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val first = fromPicker.value
+                val last = toPicker.value
+                if (first > last) {
+                    Toast.makeText(this, "结束集数不能早于开始集数", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                downloadManager.enqueueAll(
+                    data.series.id, data.series.title, data.episodes.subList(first - 1, last),
+                    source = data.series.source, episodeCount = total,
+                    maxQuality = library.maxQuality, startNumber = first,
+                )
+                dialog.dismiss()
+                showDownloadManager(anchor)
+            }
+            fromPicker.requestFocus()
+        }
+        dialog.show()
+    }
+
+    private fun mergeDownloadedSeries(seriesTasks: List<TvDownloadTask>) {
+        if (activeSeasonMerge != null) {
+            Toast.makeText(this, "已有合并任务正在进行", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val completed = seriesTasks.filter { it.status == TvDownloadStatus.COMPLETED }
+            .sortedBy { it.episodeNumber }
+        val mergeable = completed.filter {
+            it.mediaFormat != "hls" && java.io.File(it.filePath).let { file -> file.isFile && file.canRead() }
+        }
+        if (mergeable.size < 2) {
+            tvTools.info(
+                "合并本季",
+                "至少需要 2 集已完成的 MP4 单文件下载。HLS 离线缓存目前不能直接合并。",
+                root,
+            )
+            return
+        }
+        val outputDirectory = java.io.File(filesDir, "downloads/merged").apply { mkdirs() }
+        val safeTitle = seriesTasks.firstOrNull()?.seriesTitle.orEmpty()
+            .replace(Regex("[^\\p{L}\\p{N}._ -]"), "_").trim().take(48).ifBlank { "短剧" }
+        val output = java.io.File(outputDirectory, "${safeTitle}_合并_${System.currentTimeMillis()}.mp4")
+        val editedItems = mergeable.map { task ->
+            val file = java.io.File(task.filePath)
+            EditedMediaItem.Builder(MediaItem.fromUri(android.net.Uri.fromFile(file))).build()
+        }
+        val sequence = EditedMediaItemSequence.withAudioAndVideoFrom(editedItems)
+        val composition = Composition.Builder(sequence).build()
+        lateinit var progressDialog: AlertDialog
+        val listener = object : Transformer.Listener {
+            override fun onCompleted(composition: Composition, result: ExportResult) {
+                activeSeasonMerge = null
+                if (progressDialog.isShowing) progressDialog.dismiss()
+                Toast.makeText(this@MainActivity, "合并完成：${mergeable.size} 集", Toast.LENGTH_LONG).show()
+                runCatching {
+                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                        this@MainActivity, "${packageName}.updates", output,
+                    )
+                    val viewIntent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                        setDataAndType(uri, "video/mp4")
+                        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        clipData = android.content.ClipData.newUri(contentResolver, output.name, uri)
+                    }
+                    startActivity(android.content.Intent.createChooser(viewIntent, "选择外部播放器"))
+                }.onFailure {
+                    tvTools.info("合并完成", "文件已保存：${output.absolutePath}\n无法自动打开外部播放器，请从文件管理器选择此 MP4。", root)
+                }
+            }
+
+            override fun onError(composition: Composition, result: ExportResult, exception: ExportException) {
+                activeSeasonMerge = null
+                if (progressDialog.isShowing) progressDialog.dismiss()
+                output.delete()
+                tvTools.info(
+                    "合并失败",
+                    "装置可能不支持其中某集的解码或编码格式。原始下载文件不会被删除。\n${exception.message.orEmpty().take(180)}",
+                    root,
+                )
+            }
+        }
+        try {
+            val transformer = Transformer.Builder(this)
+                .setVideoMimeType(MimeTypes.VIDEO_H264)
+                .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                .addListener(listener)
+                .build()
+            activeSeasonMerge = transformer
+            val omittedHls = completed.count { it.mediaFormat == "hls" }
+            progressDialog = AlertDialog.Builder(this)
+                .setTitle("合并本季影片")
+                .setMessage(
+                    "正在合并已完成的 ${mergeable.size} 集，输出为 H.264/AAC MP4。" +
+                        if (omittedHls > 0) "\n另有 $omittedHls 集是 HLS 离线缓存，本次不会加入。" else "",
+                )
+                .setNegativeButton("取消合并", null)
+                .setCancelable(false)
+                .create()
+            progressDialog.setOnShowListener {
+                progressDialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
+                    transformer.cancel()
+                    progressDialog.setMessage("正在取消合并…")
+                    it.isEnabled = false
+                }
+            }
+            progressDialog.show()
+            transformer.start(composition, output.absolutePath)
+        } catch (failure: Exception) {
+            activeSeasonMerge = null
+            output.delete()
+            if (::progressDialog.isInitialized && progressDialog.isShowing) progressDialog.dismiss()
+            tvTools.info("无法开始合并", failure.message.orEmpty().take(180), root)
+        }
+    }
+
     private fun showDownloadManager(anchor: View? = null) {
         val list = column()
+        val controls = row().apply { gravity = Gravity.CENTER_VERTICAL }
+        val bodyContent = column()
+        bodyContent.addView(controls)
+        bodyContent.addView(list)
         val scroll = ScrollView(this).apply {
             isFillViewport = true
             isVerticalScrollBarEnabled = false
-            addView(list, android.widget.FrameLayout.LayoutParams(-1, -2))
+            addView(bodyContent, android.widget.FrameLayout.LayoutParams(-1, -2))
         }
         lateinit var dialog: AlertDialog
         fun render(items: List<TvDownloadTask>) {
             val restoreFocusTag = (currentFocus?.tag as? String)?.takeIf { it.startsWith("download-action:") }
             var firstAction: View? = null
+            controls.removeAllViews()
+            controls.addView(text("同时下载上限", 13f, muted), lp(-2, -2).apply { rightMargin = dp(10) })
+            val limitButton = Button(this).apply {
+                text = "${downloadManager.maxConcurrentDownloads()} 集"
+                isFocusable = true
+                isAllCaps = false
+                textSize = 13f
+                minHeight = dp(42)
+                tag = "download-action:concurrency"
+                focusStyle(this)
+                setOnClickListener {
+                    val next = if (downloadManager.maxConcurrentDownloads() >= 3) 1
+                        else downloadManager.maxConcurrentDownloads() + 1
+                    downloadManager.setMaxConcurrentDownloads(next)
+                    render(downloadManager.snapshot())
+                }
+            }
+            controls.addView(limitButton)
+            if (firstAction == null) firstAction = limitButton
             list.removeAllViews()
             if (items.isEmpty()) {
-                list.addView(text("下载队列为空。请先在剧集详情选择单集下载或批量下载。", 15f, muted).apply {
+                list.addView(text("下载队列为空。请先在剧集详情选择集数下载。", 15f, muted).apply {
                     setPadding(dp(18), dp(24), dp(18), dp(24))
                 })
                 return
             }
-            items.forEach { task ->
-                val card = column().apply {
-                    setPadding(dp(14), dp(12), dp(14), dp(12))
+            items.groupBy { it.seriesId }.values.forEach { groupItems ->
+                val ordered = groupItems.sortedBy { it.episodeNumber }
+                val sample = ordered.first()
+                val complete = ordered.count { it.status == TvDownloadStatus.COMPLETED }
+                val downloading = ordered.count { it.status == TvDownloadStatus.DOWNLOADING }
+                val waiting = ordered.count { it.status == TvDownloadStatus.PENDING }
+                val header = row().apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(12), dp(10), dp(8), dp(10))
                     background = TvVisual.panel(this@MainActivity)
                 }
-                val status = when (task.status) {
-                    TvDownloadStatus.PENDING -> "等待中"
-                    TvDownloadStatus.DOWNLOADING -> "下载中"
-                    TvDownloadStatus.PAUSED -> "已暂停"
-                    TvDownloadStatus.INTERRUPTED -> "已中斷，需要手動继续"
-                    TvDownloadStatus.COMPLETED -> "已完成"
-                    TvDownloadStatus.FAILED -> "失败"
-                    TvDownloadStatus.CANCELLED -> "已取消"
+                header.addView(text(
+                    "${sample.seriesTitle} · 共 ${ordered.size} 集 · 完成 $complete · 下载中 $downloading · 等待 $waiting",
+                    14f,
+                ).apply { setTypeface(null, Typeface.BOLD) }, lp(0, -2).apply { weight = 1f })
+                val mergeableCount = ordered.count {
+                    it.status == TvDownloadStatus.COMPLETED && it.mediaFormat != "hls" &&
+                        java.io.File(it.filePath).isFile
                 }
-                card.addView(text("${task.seriesTitle} · 第 ${task.episodeNumber} 集", 15f).apply {
-                    setTypeface(null, Typeface.BOLD)
-                })
-                val progressText = if (task.total > 0)
-                    "$status · ${task.progress}% · ${formatDownloadBytes(task.bytes)} / ${formatDownloadBytes(task.total)}"
-                else status
-                card.addView(text(progressText, 12f, muted).apply { setPadding(0, dp(5), 0, dp(4)) })
-                if (task.error.isNotBlank()) card.addView(text(task.error, 12f, Color.rgb(208, 151, 84)))
-                val actions = row()
-                fun action(label: String, tag: String, callback: () -> Unit) {
-                    val control = Button(this).apply {
-                        text = label
+                if (mergeableCount >= 2) {
+                    val mergeButton = Button(this).apply {
+                        text = "合并 $mergeableCount 集"
                         isFocusable = true
                         isAllCaps = false
                         textSize = 12f
-                        minHeight = dp(42)
-                        setPadding(dp(10), 0, dp(10), 0)
-                        this.tag = tag
+                        minHeight = dp(40)
+                        tag = "download-action:merge:${sample.seriesId}"
                         focusStyle(this)
-                        setOnClickListener { callback() }
+                        setOnClickListener { mergeDownloadedSeries(ordered) }
                     }
-                    if (firstAction == null) firstAction = control
-                    actions.addView(control, lp(-2, -2).apply { rightMargin = dp(6) })
+                    if (firstAction == null) firstAction = mergeButton
+                    header.addView(mergeButton, lp(-2, -2).apply { leftMargin = dp(8) })
                 }
-                when (task.status) {
-                    TvDownloadStatus.PENDING, TvDownloadStatus.DOWNLOADING -> {
-                        action("暂停", "download-action:${task.id}:pause") { downloadManager.pause(task.id) }
-                        action("取消", "download-action:${task.id}:cancel") { downloadManager.cancel(task.id) }
+                list.addView(header, lp(-1, -2).apply { bottomMargin = dp(6) })
+                ordered.forEach { task ->
+                    val card = column().apply {
+                        setPadding(dp(14), dp(12), dp(14), dp(12))
+                        background = TvVisual.panel(this@MainActivity)
                     }
-                    TvDownloadStatus.INTERRUPTED, TvDownloadStatus.PAUSED, TvDownloadStatus.FAILED -> {
-                        action("继续／重试", "download-action:${task.id}:resume") { downloadManager.resume(task.id) }
-                        action("取消", "download-action:${task.id}:cancel") { downloadManager.cancel(task.id) }
+                    val status = when (task.status) {
+                        TvDownloadStatus.PENDING -> "等待中"
+                        TvDownloadStatus.DOWNLOADING -> "下载中"
+                        TvDownloadStatus.PAUSED -> "已暂停"
+                        TvDownloadStatus.INTERRUPTED -> "已中断，需要手动继续"
+                        TvDownloadStatus.COMPLETED -> "已完成"
+                        TvDownloadStatus.FAILED -> "失败"
+                        TvDownloadStatus.CANCELLED -> "已取消"
                     }
-                    TvDownloadStatus.COMPLETED -> {
-                        action("本机播放", "download-action:${task.id}:play") { playDownloadedTask(task) }
-                        action("删除文件", "download-action:${task.id}:delete") { downloadManager.remove(task.id, deleteFile = true) }
+                    card.addView(text("${task.seriesTitle} · 第 ${task.episodeNumber} 集", 15f).apply {
+                        setTypeface(null, Typeface.BOLD)
+                    })
+                    val progressText = if (task.total > 0)
+                        "$status · ${task.progress}% · ${formatDownloadBytes(task.bytes)} / ${formatDownloadBytes(task.total)}"
+                    else status
+                    card.addView(text(progressText, 12f, muted).apply { setPadding(0, dp(5), 0, dp(4)) })
+                    if (task.error.isNotBlank()) card.addView(text(task.error, 12f, Color.rgb(208, 151, 84)))
+                    val actions = row()
+                    fun action(label: String, tag: String, callback: () -> Unit) {
+                        val control = Button(this).apply {
+                            text = label
+                            isFocusable = true
+                            isAllCaps = false
+                            textSize = 12f
+                            minHeight = dp(42)
+                            setPadding(dp(10), 0, dp(10), 0)
+                            this.tag = tag
+                            focusStyle(this)
+                            setOnClickListener { callback() }
+                        }
+                        if (firstAction == null) firstAction = control
+                        actions.addView(control, lp(-2, -2).apply { rightMargin = dp(6) })
                     }
-                    TvDownloadStatus.CANCELLED -> action("移除记录", "download-action:${task.id}:remove") { downloadManager.remove(task.id) }
+                    when (task.status) {
+                        TvDownloadStatus.PENDING, TvDownloadStatus.DOWNLOADING -> {
+                            action("暂停", "download-action:${task.id}:pause") { downloadManager.pause(task.id) }
+                            action("取消", "download-action:${task.id}:cancel") { downloadManager.cancel(task.id) }
+                        }
+                        TvDownloadStatus.INTERRUPTED, TvDownloadStatus.PAUSED, TvDownloadStatus.FAILED -> {
+                            action("继续／重试", "download-action:${task.id}:resume") { downloadManager.resume(task.id) }
+                            action("取消", "download-action:${task.id}:cancel") { downloadManager.cancel(task.id) }
+                        }
+                        TvDownloadStatus.COMPLETED -> {
+                            action("本机连续播放", "download-action:${task.id}:play") { playDownloadedTask(task) }
+                            action("删除文件", "download-action:${task.id}:delete") { downloadManager.remove(task.id, deleteFile = true) }
+                        }
+                        TvDownloadStatus.CANCELLED -> action("移除记录", "download-action:${task.id}:remove") { downloadManager.remove(task.id) }
+                    }
+                    card.addView(actions)
+                    list.addView(card, lp(-1, -2).apply { bottomMargin = dp(8) })
                 }
-                card.addView(actions)
-                list.addView(card, lp(-1, -2).apply { bottomMargin = dp(8) })
             }
             if (restoreFocusTag != null) {
-                list.post {
-                    val restored = list.findViewWithTag<View>(restoreFocusTag)
+                scroll.post {
+                    val restored = scroll.findViewWithTag<View>(restoreFocusTag)
                     if (restored != null) restored.requestFocus() else firstAction?.requestFocus()
                 }
+            } else if (firstAction != null) {
+                firstAction?.requestFocus()
             }
         }
         dialog = AlertDialog.Builder(this)
@@ -3150,22 +3411,7 @@ class MainActivity : Activity() {
             addButton(actions, "评论 · 第 ${episodeIndex+1} 集") { social.showComments(detailComments) }
         val secondary = row().apply { setPadding(0, dp(8), 0, 0) }
         info.addView(secondary)
-        addButton(secondary, "下载第 ${episodeIndex + 1} 集") {
-            downloadManager.enqueue(
-                data.series.id, data.series.title, data.episodes[episodeIndex],
-                episodeIndex + 1, source = data.series.source, episodeCount = data.episodes.size,
-                maxQuality = library.maxQuality,
-            )
-            showDownloadManager(play)
-        }
-        addButton(secondary, "批量下载全部 ${data.episodes.size} 集") {
-            downloadManager.enqueueAll(
-                data.series.id, data.series.title, data.episodes,
-                source = data.series.source, episodeCount = data.episodes.size,
-                maxQuality = library.maxQuality,
-            )
-            showDownloadManager(play)
-        }
+        addButton(secondary, "下载选集") { showDownloadRangeDialog(data, play) }
         accountFavoriteButton =
             addButton(secondary, detailFavoriteLabel(data.series)) {
                 if (data.series.source == "hongguo" && cloudAccount.signedIn) {

@@ -18,6 +18,9 @@ import java.util.concurrent.RejectedExecutionException
 
 internal enum class TvDownloadStatus { PENDING, DOWNLOADING, INTERRUPTED, PAUSED, COMPLETED, FAILED, CANCELLED }
 
+internal fun downloadWorkerSlots(maxConcurrentDownloads: Int, runningTasks: Int): Int =
+    (maxConcurrentDownloads.coerceIn(1, 3) - runningTasks.coerceAtLeast(0)).coerceAtLeast(0)
+
 internal fun restoredDownloadStatus(status: TvDownloadStatus, executionSessionWasActive: Boolean): TvDownloadStatus =
     if (status == TvDownloadStatus.DOWNLOADING ||
         (executionSessionWasActive && status == TvDownloadStatus.PENDING)
@@ -60,13 +63,14 @@ internal class TvDownloadManager(
     private val app = context.applicationContext
     private val directory = File(app.filesDir, "downloads").apply { mkdirs() }
     private val preferences = app.getSharedPreferences("tv-download-queue", Context.MODE_PRIVATE)
-    private val executor = Executors.newSingleThreadExecutor()
+    private val executor = Executors.newFixedThreadPool(3)
     private val lock = Any()
+    private var maxConcurrentDownloads = preferences.getInt("max_concurrent_downloads", 1).coerceIn(1, 3)
+    private val runningTasks = mutableSetOf<String>()
     private val activeVideos = mutableMapOf<String, RemoteVideo>()
     private val activeHlsDownloaders = mutableMapOf<String, androidx.media3.exoplayer.offline.Downloader>()
     private val tasks = linkedMapOf<String, TvDownloadTask>()
     private val listeners = CopyOnWriteArrayList<(List<TvDownloadTask>) -> Unit>()
-    private var draining = false
     private var executionAllowed = false
     private var executionSessionActive = preferences.getBoolean("execution_active", false)
 
@@ -93,6 +97,17 @@ internal class TvDownloadManager(
     }
 
     fun snapshot(): List<TvDownloadTask> = synchronized(lock) { tasks.values.toList() }
+
+    fun maxConcurrentDownloads(): Int = synchronized(lock) { maxConcurrentDownloads }
+
+    fun setMaxConcurrentDownloads(value: Int) {
+        synchronized(lock) {
+            maxConcurrentDownloads = value.coerceIn(1, 3)
+            preferences.edit().putInt("max_concurrent_downloads", maxConcurrentDownloads).apply()
+        }
+        publish()
+        drain()
+    }
 
     fun observe(listener: (List<TvDownloadTask>) -> Unit): () -> Unit {
         listeners += listener
@@ -125,13 +140,16 @@ internal class TvDownloadManager(
     fun enqueueAll(
         seriesId: String, seriesTitle: String, episodeIds: List<String>,
         source: String = "", episodeCount: Int = episodeIds.size, maxQuality: Int = 1080,
+        startNumber: Int = 1,
     ) {
         require(seriesId.matches(Regex("[0-9]{1,30}")))
         val items = episodeIds.take(500)
         require(items.all { it.matches(Regex("[0-9]{1,30}")) })
+        require(startNumber in 1..10000)
+        require(items.isEmpty() || startNumber + items.size - 1 <= 10000)
         synchronized(lock) {
             items.forEachIndexed { index, episodeId ->
-                val number = index + 1
+                val number = startNumber + index
                 val id = UUID.randomUUID().toString()
                 val safeTitle = seriesTitle.replace(Regex("[^\\p{L}\\p{N}._ -]"), "_").trim().take(48).ifBlank { "短剧" }
                 val target = File(directory, "${safeTitle}_第${number}集_${id.take(8)}.mp4")
@@ -278,46 +296,67 @@ internal class TvDownloadManager(
     }
 
     private fun drain() {
-        synchronized(lock) {
-            if (!executionAllowed || draining || executor.isShutdown) return
-            draining = true
+        val launchIds = synchronized(lock) {
+            if (!executionAllowed || executor.isShutdown) return
+            val capacity = downloadWorkerSlots(maxConcurrentDownloads, runningTasks.size)
+            val next = tasks.values
+                .filter { it.status == TvDownloadStatus.PENDING }
+                .take(capacity)
+            next.forEach { task ->
+                runningTasks += task.id
+                tasks[task.id] = task.copy(status = TvDownloadStatus.DOWNLOADING, error = "")
+            }
+            if (next.isNotEmpty()) persistLocked()
+            next.map { it.id }
         }
-        try {
-            executor.execute {
-                try {
-                    while (true) {
-                    val task = synchronized(lock) {
-                        if (!executionAllowed) null else tasks.values.firstOrNull { it.status == TvDownloadStatus.PENDING }?.also {
-                            tasks[it.id] = it.copy(status = TvDownloadStatus.DOWNLOADING, error = "")
-                            persistLocked()
-                        }
-                    } ?: break
-                    publish()
-                    execute(task.id)
-                }
-                } finally {
-                    val continueQueue = synchronized(lock) {
-                        draining = false
-                        val pending = tasks.values.any { it.status == TvDownloadStatus.PENDING }
-                        if (!pending) {
-                            executionAllowed = false
-                            executionSessionActive = false
-                            persistLocked()
-                        }
-                        pending && executionAllowed
-                    }
-                    if (continueQueue) drain()
+        if (launchIds.isEmpty()) {
+            synchronized(lock) {
+                val pending = tasks.values.any { it.status == TvDownloadStatus.PENDING }
+                if (executionAllowed && runningTasks.isEmpty() && !pending) {
+                    executionAllowed = false
+                    executionSessionActive = false
+                    persistLocked()
                 }
             }
-        } catch (_: RejectedExecutionException) {
-            synchronized(lock) { draining = false }
+            return
+        }
+        publish()
+        launchIds.forEach { id ->
+            try {
+                executor.execute {
+                    try {
+                        execute(id)
+                    } finally {
+                        synchronized(lock) {
+                            runningTasks.remove(id)
+                            val pending = tasks.values.any { it.status == TvDownloadStatus.PENDING }
+                            if (runningTasks.isEmpty() && !pending) {
+                                executionAllowed = false
+                                executionSessionActive = false
+                                persistLocked()
+                            }
+                        }
+                        publish()
+                        drain()
+                    }
+                }
+            } catch (_: RejectedExecutionException) {
+                synchronized(lock) {
+                    runningTasks.remove(id)
+                    tasks[id]?.takeIf { it.status == TvDownloadStatus.DOWNLOADING }?.let {
+                        tasks[id] = it.copy(status = TvDownloadStatus.INTERRUPTED, error = "下载工作线程无法启动")
+                    }
+                    persistLocked()
+                }
+                publish()
+            }
         }
     }
 
     private fun execute(id: String) {
         var opened: OpenedStream? = null
         try {
-            val task = synchronized(lock) { tasks[id] } ?: return
+            val task = synchronized(lock) { tasks[id]?.takeIf { it.status == TvDownloadStatus.DOWNLOADING } } ?: return
             val hlsPlan = openHls(task.episodeId, task.seriesTitle, task.episodeNumber, task.episodeCount, task.source, task.maxQuality)
             if (hlsPlan != null) {
                 downloadHls(task, hlsPlan)
