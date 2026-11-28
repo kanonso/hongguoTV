@@ -303,6 +303,7 @@ class MainActivity : Activity() {
     private var catalogBody: LinearLayout? = null
     private var homePosition: HomeScreen.Position? = null
     private var catalogPageKey = ""
+    private var openHongguoBrowse = false
     private val scrollPositions = mutableMapOf<String, Int>()
     private val catalogCards = linkedMapOf<String, View>()
     private val cardImages = linkedMapOf<String, Pair<ImageView, String>>()
@@ -978,6 +979,7 @@ class MainActivity : Activity() {
         tabState[tab] = CatalogState(page, catalog, hasMore, ranking)
         tabFocus[tab] = catalogFocus
         if (next == 6) { settingsGroup = 0; settingsPositions[0] = 0 }
+        if (next != 1) openHongguoBrowse = false
         tab = next
         val saved = tabState[next]
         page = saved?.page ?: 1
@@ -1249,14 +1251,58 @@ class MainActivity : Activity() {
             return
         }
         if (tab == 1) {
-
+            val sourceTabs = row().apply { setPadding(0, 0, 0, dp(8)) }
+            addButton(sourceTabs, "红果发现", selected = !openHongguoBrowse) {
+                if (openHongguoBrowse) {
+                    openHongguoBrowse = false
+                    page = 1
+                    catalog = emptyList()
+                    hasMore = false
+                    showCatalog(load = true, focusNav = true)
+                }
+            }
+            addButton(sourceTabs, "OpenHongguo 推荐目录", selected = openHongguoBrowse) {
+                if (!openHongguoBrowse) {
+                    openHongguoBrowse = true
+                    page = 1
+                    catalog = emptyList()
+                    hasMore = false
+                    showCatalog(load = true, focusNav = true)
+                }
+            }
+            container.addView(sourceTabs)
+            if (openHongguoBrowse) {
+                val body = column()
+                container.addView(body, lp(-1, 0).apply { weight = 1f })
+                if (loadRemote) {
+                    message(body, "正在加载 OpenHongguo 推荐目录…")
+                    val requestedPage = page
+                    work(
+                        { openHongguoAdapter.discover(requestedPage) },
+                        { result ->
+                            catalog = result.items
+                            hasMore = result.hasMore
+                            ranking = null
+                            body.removeAllViews()
+                            catalogGrid(body, focusNav = focusNav)
+                        },
+                        { problem ->
+                            body.removeAllViews()
+                            error(body, problem) { showCatalog(load = true, focusNav = true) }
+                        },
+                    )
+                } else {
+                    catalogGrid(body, focusNav)
+                }
+                return
+            }
             val browser = DiscoveryScreen(
-            this, discoveryBrowser, nav[tab], ::loadCover,
-            { openDetail(it, false) }, ::quickActions,
-            { selection, cursor, done ->
-                work({ repository.filteredDiscovery(selection, cursor) },
-                    { done(it, null) }, { done(null, it) })
-            },
+                this, discoveryBrowser, nav[tab], ::loadCover,
+                { openDetail(it, false) }, ::quickActions,
+                { selection, cursor, done ->
+                    work({ repository.filteredDiscovery(selection, cursor) },
+                        { done(it, null) }, { done(null, it) })
+                },
             )
             discoveryScreen = browser
             browser.setSideEntry(nav[1])
@@ -2688,7 +2734,7 @@ class MainActivity : Activity() {
 
     private fun playDownloadedTask(task: TvDownloadTask) {
         val completed = downloadManager.snapshot()
-            .filter { it.seriesId == task.seriesId && it.status == TvDownloadStatus.COMPLETED }
+            .filter { downloadGroupKey(it) == downloadGroupKey(task) && it.status == TvDownloadStatus.COMPLETED }
             .sortedBy { it.episodeNumber }
         val factory = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(
             androidx.media3.datasource.DefaultDataSource.Factory(this),
@@ -2820,7 +2866,7 @@ class MainActivity : Activity() {
             .setNeutralButton("全部下载 $total 集") { _, _ ->
                 downloadManager.enqueueAll(
                     data.series.id, data.series.title, data.episodes,
-                    source = data.series.source, episodeCount = total,
+                    source = data.episodeSource, episodeCount = total,
                     maxQuality = library.maxQuality, startNumber = 1,
                 )
                 showDownloadManager(anchor)
@@ -2837,7 +2883,7 @@ class MainActivity : Activity() {
                 }
                 downloadManager.enqueueAll(
                     data.series.id, data.series.title, data.episodes.subList(first - 1, last),
-                    source = data.series.source, episodeCount = total,
+                    source = data.episodeSource, episodeCount = total,
                     maxQuality = library.maxQuality, startNumber = first,
                 )
                 dialog.dismiss()
@@ -3017,7 +3063,7 @@ class MainActivity : Activity() {
                 })
                 return
             }
-            items.groupBy { it.seriesId }.values.forEach { groupItems ->
+            items.groupBy(::downloadGroupKey).values.forEach { groupItems ->
                 val ordered = groupItems.sortedBy { it.episodeNumber }
                 val sample = ordered.first()
                 val complete = ordered.count { it.status == TvDownloadStatus.COMPLETED }
@@ -3029,7 +3075,7 @@ class MainActivity : Activity() {
                     background = TvVisual.panel(this@MainActivity)
                 }
                 header.addView(text(
-                    "${sample.seriesTitle} · 共 ${ordered.size} 集 · 完成 $complete · 下载中 $downloading · 等待 $waiting",
+                    "${if (sample.source == "openhongguo") "OpenHongguo" else "红果"} · ${sample.seriesTitle} · 共 ${ordered.size} 集 · 完成 $complete · 下载中 $downloading · 等待 $waiting",
                     14f,
                 ).apply { setTypeface(null, Typeface.BOLD) }, lp(0, -2).apply { weight = 1f })
                 val mergeableCount = ordered.count {
@@ -3279,8 +3325,20 @@ class MainActivity : Activity() {
         work(
             {
                 if (series.source == "openhongguo") {
-                    Detail(series, openHongguoAdapter.listEpisodeIds(series.id))
-                } else repository.detail(series.id)
+                    val rows = openHongguoAdapter.listPlayableEpisodes(series.id)
+                    Detail(series, rows.map { it.second }, episodeSource = "openhongguo")
+                } else {
+                    try {
+                        repository.detail(series.id)
+                    } catch (primaryFailure: Exception) {
+                        if (series.source != "hongguo" || primaryFailure is InterruptedException || Thread.currentThread().isInterrupted)
+                            throw primaryFailure
+                        val expectedCount = OpenHongguoDirectoryPolicy.expectedCountFromBadge(series.badge)
+                            ?: throw primaryFailure
+                        val fallbackEpisodes = openHongguoAdapter.listCompleteEpisodeDirectoryBySeriesTitle(series.title, expectedCount)
+                        Detail(series, fallbackEpisodes.map { it.second }, episodeSource = "openhongguo")
+                    }
+                }
             },
             { result ->
                 detail = result
@@ -3474,6 +3532,12 @@ class MainActivity : Activity() {
                 scroll.post { scroll.scrollTo(0, previousScroll) }
             }
         content.addView(hero)
+        if (data.episodeSource != data.series.source) {
+            content.addView(text(
+                "分集目录备援来源：OpenHongguo · 已核对剧名、季别与总集数；观看记录仍保留在原红果剧集",
+                12f, muted,
+            ).apply { setPadding(0, dp(8), 0, dp(2)); maxLines = 2 })
+        }
         content.addView(text("选集分组 · 共 ${data.episodes.size} 集", 12f, muted).apply {
             setPadding(0, dp(12), 0, dp(6))
         })
@@ -3870,11 +3934,11 @@ class MainActivity : Activity() {
                             recentPlaybackSources,
                             metadataAhead = data.episodes.drop(selectedIndex + 1).take(2),
                             sourceOrder = playbackSourceSettings.order(),
-                            enabledSources = if (data.series.source == "openhongguo")
-                                playbackSourceSettings.enabled().intersect(setOf("openhongguo"))
+                            enabledSources = if (data.episodeSource == "openhongguo")
+                                setOf("openhongguo")
                             else playbackSourceSettings.enabled(),
                             openHongguoLadder = {
-                                if (data.series.source == "openhongguo") openHongguoAdapter.resolvePlayback(requestedId)
+                                if (data.episodeSource == "openhongguo") openHongguoAdapter.resolvePlayback(requestedId)
                                 else openHongguoAdapter.resolvePlaybackBySeriesTitle(data.series.title, selectedIndex + 1, data.episodes.size)
                             },
                         ) {
@@ -4101,7 +4165,7 @@ class MainActivity : Activity() {
         val p = player ?: return
         val data = detail ?: return
         // Community provider episode IDs are not App IDs; skip speculative App prefetch.
-        if (data.series.source == "openhongguo") return
+        if (data.episodeSource == "openhongguo") return
         if (
             !foreground ||
                 !p.isPlaying ||
