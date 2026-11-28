@@ -40,7 +40,45 @@ class MainActivity : Activity() {
     private val muted get() = TvStyle.muted
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newFixedThreadPool(3)
-    private val repository = ContentRepository(playbackSession = PlaybackDeviceSession.shared)
+    private val playbackStrategyPack by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        PlaybackStrategyPackManager(applicationContext)
+    }
+    private val repository = ContentRepository(
+        playbackSession = PlaybackDeviceSession.shared,
+        playbackStrategy = { playbackStrategyPack.policy() },
+    )
+    private var strategyCheckRunning = false
+    private val strategyPackCheckRunnable = object : Runnable {
+        override fun run() {
+            if (isFinishing || isDestroyed) return
+            checkPlaybackStrategyPack(force = false) {}
+            main.postDelayed(this, PlaybackStrategyPackManager.CHECK_INTERVAL_MS)
+        }
+    }
+
+    private fun checkPlaybackStrategyPack(force: Boolean, finished: (PlaybackStrategyStatus) -> Unit) {
+        if (strategyCheckRunning) return
+        strategyCheckRunning = true
+        io.execute {
+            val status = runCatching { playbackStrategyPack.check(force) }
+                .getOrElse { failure ->
+                    playbackStrategyPack.status().copy(error = failure.message ?: "策略更新检查失败")
+                }
+            main.post {
+                strategyCheckRunning = false
+                finished(status)
+            }
+        }
+    }
+
+    private fun strategyStatusText(status: PlaybackStrategyStatus): String {
+        val issued = status.issuedAt.ifBlank { "内置默认" }
+        val checked = if (status.lastCheckAt > 0) {
+            java.text.DateFormat.getDateTimeInstance().format(java.util.Date(status.lastCheckAt))
+        } else "尚未检查"
+        return "策略版本：${status.revision} · 路由：${status.routeCount} 条 · 来源：${status.source}\n发布时间：$issued\n最近检查：$checked\n" +
+            (status.error.takeIf { it.isNotBlank() }?.let { "状态：$it" } ?: "签名校验：已启用")
+    }
     private val playbackSourceSettings by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { PlaybackSourceSettings(applicationContext) }
     private val downloadManagerDelegate = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         TvDownloadManager(this) { episodeId, seriesTitle, episodeNumber, source ->
@@ -664,6 +702,9 @@ class MainActivity : Activity() {
         tvTools = TvTools(this)
         root = FrameLayout(this).apply { background = TvVisual.backdrop(this@MainActivity) }
         setContentView(root)
+        playbackStrategyPack.status()
+        checkPlaybackStrategyPack(force = false) {}
+        main.postDelayed(strategyPackCheckRunnable, PlaybackStrategyPackManager.CHECK_INTERVAL_MS)
         CodecCapabilities.init(this)
         CodecCapabilities.logDeviceCapabilities()
         cloudAccount =
@@ -2558,6 +2599,33 @@ class MainActivity : Activity() {
                         refreshSources()
                     }
                     refreshSources()
+
+                    val strategyStatus = text(strategyStatusText(playbackStrategyPack.status()), 13f, muted).apply {
+                        setPadding(0, dp(12), 0, dp(8))
+                    }
+                    content.addView(strategyStatus)
+                    setting(if (playbackStrategyPack.status().enabled) "停用自動簽名策略更新" else "啟用自動簽名策略更新") {
+                        val changed = playbackStrategyPack.setEnabled(!playbackStrategyPack.status().enabled)
+                        strategyStatus.text = strategyStatusText(changed)
+                    }
+                    setting("立即檢查簽名策略更新") {
+                        if (!strategyCheckRunning) {
+                            strategyStatus.text = "正在檢查簽名策略……"
+                            checkPlaybackStrategyPack(force = true) { next ->
+                                strategyStatus.text = strategyStatusText(next)
+                            }
+                        } else {
+                            strategyStatus.text = strategyStatusText(playbackStrategyPack.status()) + "\\n正在檢查中"
+                        }
+                    }
+                    setting("回滾上一版簽名策略") {
+                        val rolledBack = playbackStrategyPack.rollback()
+                        strategyStatus.text = strategyStatusText(rolledBack)
+                    }
+                    setting("恢復內置簽名策略") {
+                        val reset = playbackStrategyPack.resetToEmbedded()
+                        strategyStatus.text = strategyStatusText(reset)
+                    }
                 }
                 6 -> {
                     content.addView(text("下载文件保存在应用私有目录。可在剧集详情加入单集或整剧队列；下载期间保持应用运行。", 14f, muted).apply {
