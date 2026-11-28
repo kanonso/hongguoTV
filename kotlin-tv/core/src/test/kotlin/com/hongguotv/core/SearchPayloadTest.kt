@@ -1,6 +1,7 @@
 package com.hongguotv.core
 
 import okhttp3.OkHttpClient
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -133,6 +134,47 @@ class SearchPayloadTest {
         val page = ContentRepository(http).search("大佬，你该出手了第五季", type = ContentType.SHORT)
         assertEquals(listOf("700001", "700002"), page.items.map { it.id })
         assertEquals(listOf("/reading/bookapi/search/tab/v", "/api/search/result"), requests)
+    }
+
+    @Test fun publicMp4FallbackAcceptsOnlyExpectedHttpsMediaAndNoContentKey() {
+        val body = """{"base_resp":{"StatusCode":0},"main_url":"https://cdn.fqnovelvod.com/video/episode.mp4","url_expire":4102444800}"""
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request()
+            assertEquals("POST", request.method)
+            assertEquals("https://hongguoduanju.com/api/video/protected/fallback-play-info", request.url.toString())
+            assertTrue(request.header("Referer")?.startsWith("https://hongguoduanju.com/") == true)
+            okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1)
+                .code(200).message("OK").body(okhttp3.ResponseBody.create(null, body)).build()
+        }.build()
+        val result = ContentRepository(http).publicWebsiteMp4Fallback("123456789")
+        assertEquals(360, result.quality)
+        assertEquals("h264", result.codec)
+        assertNull(result.key)
+        assertEquals("web", result.source)
+        assertEquals("cdn.fqnovelvod.com", result.url.toHttpUrl().host)
+    }
+
+    @Test fun publicMp4FallbackRejectsUntrustedMediaHosts() {
+        val body = """{"base_resp":{"StatusCode":0},"main_url":"https://attacker.example/episode.mp4"}"""
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request()
+            okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1)
+                .code(200).message("OK").body(okhttp3.ResponseBody.create(null, body)).build()
+        }.build()
+        val failure = runCatching { ContentRepository(http).publicWebsiteMp4Fallback("123456789") }.exceptionOrNull()
+        assertTrue(failure is java.io.IOException)
+        assertTrue(failure?.message.orEmpty().contains("安全校验"))
+    }
+
+    @Test fun publicMp4FallbackDoesNotTreatUnavailablePublicEpisodeAsPlayable() {
+        val body = """{"base_resp":{"StatusCode":0},"error":"public_fallback_unavailable"}"""
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request()
+            okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1)
+                .code(200).message("OK").body(okhttp3.ResponseBody.create(null, body)).build()
+        }.build()
+        val failure = runCatching { ContentRepository(http).publicWebsiteMp4Fallback("123456789") }.exceptionOrNull()
+        assertTrue(failure is java.io.IOException)
     }
 
     @Test fun pinyinSearchKeepsServerMatchesWithChineseTitles() {
