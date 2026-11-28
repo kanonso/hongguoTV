@@ -3,7 +3,8 @@ package com.hongguotv.nativeapp
 
 import android.content.Context
 import android.util.Base64
-import com.hongguotv.nativeapp.R
+import com.hongguotv.core.PlaybackStrategyPolicy
+import com.hongguotv.core.PlaybackStrategyRoute
 import net.i2p.crypto.eddsa.EdDSAEngine
 import net.i2p.crypto.eddsa.EdDSAPublicKey
 import okhttp3.OkHttpClient
@@ -17,29 +18,6 @@ import java.nio.charset.StandardCharsets
 import java.security.spec.X509EncodedKeySpec
 import java.time.Instant
 import java.util.concurrent.TimeUnit
-
-internal data class PlaybackStrategyRoute(
-    val id: String,
-    val enabled: Boolean,
-    val order: Int,
-    val auth: String,
-    val url: String?,
-    val values: Map<String, Any>,
-    val body: Map<String, Any>,
-    val headers: Map<String, String>,
-    val field21: Int?,
-)
-
-internal data class PlaybackStrategyPolicy(
-    val revision: Int,
-    val keyId: String,
-    val issuedAt: String,
-    val expiresAt: String?,
-    val routes: List<PlaybackStrategyRoute>,
-) {
-    fun route(id: String): PlaybackStrategyRoute? = routes.firstOrNull { it.id == id && it.enabled }
-    fun orderedRoutes(): List<PlaybackStrategyRoute> = routes.filter { it.enabled }.sortedBy { it.order }
-}
 
 internal data class PlaybackStrategyStatus(
     val enabled: Boolean,
