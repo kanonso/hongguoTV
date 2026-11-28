@@ -12,6 +12,7 @@ import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 internal enum class TvDownloadStatus { PENDING, DOWNLOADING, PAUSED, COMPLETED, FAILED, CANCELLED }
 
@@ -61,6 +62,9 @@ internal class TvDownloadManager(
             else restored
         }
         persistLocked()
+        // Resume tasks that had not started before a process/activity restart. In-flight tasks
+        // are restored as PAUSED above and require an explicit user action.
+        if (tasks.values.any { it.status == TvDownloadStatus.PENDING }) drain()
     }
 
     fun snapshot(): List<TvDownloadTask> = synchronized(lock) { tasks.values.toList() }
@@ -146,9 +150,10 @@ internal class TvDownloadManager(
             if (draining || executor.isShutdown) return
             draining = true
         }
-        executor.execute {
-            try {
-                while (true) {
+        try {
+            executor.execute {
+                try {
+                    while (true) {
                     val task = synchronized(lock) {
                         tasks.values.firstOrNull { it.status == TvDownloadStatus.PENDING }?.also {
                             tasks[it.id] = it.copy(status = TvDownloadStatus.DOWNLOADING, error = "")
@@ -158,10 +163,13 @@ internal class TvDownloadManager(
                     publish()
                     execute(task.id)
                 }
-            } finally {
-                synchronized(lock) { draining = false }
-                if (synchronized(lock) { tasks.values.any { it.status == TvDownloadStatus.PENDING } }) drain()
+                } finally {
+                    synchronized(lock) { draining = false }
+                    if (synchronized(lock) { tasks.values.any { it.status == TvDownloadStatus.PENDING } }) drain()
+                }
             }
+        } catch (_: RejectedExecutionException) {
+            synchronized(lock) { draining = false }
         }
     }
 
