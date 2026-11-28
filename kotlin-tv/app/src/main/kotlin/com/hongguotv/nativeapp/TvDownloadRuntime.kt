@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import androidx.media3.common.util.UnstableApi
 import com.hongguotv.core.ContentRepository
 import com.hongguotv.core.PlaybackDeviceSession
 import java.io.IOException
@@ -62,6 +63,7 @@ private class DownloadStreamOpener(context: Context) {
 }
 
 /** A single process-wide queue using only application-context dependencies. */
+@UnstableApi
 internal object TvDownloadRuntime {
     @Volatile private var instance: TvDownloadManager? = null
     @Volatile private var hlsStore: HlsOfflineStore? = null

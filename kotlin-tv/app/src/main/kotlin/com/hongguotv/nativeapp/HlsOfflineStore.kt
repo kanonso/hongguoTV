@@ -171,7 +171,7 @@ internal object HlsVodPlaylistValidator {
 }
 
 /** Persistent HLS VOD cache. Cache namespaces are per task and strip expiring URL query strings. */
-@OptIn(UnstableApi::class)
+@UnstableApi
 internal class HlsOfflineStore(context: Context) {
     private val app = context.applicationContext
     private val database = StandaloneDatabaseProvider(app)

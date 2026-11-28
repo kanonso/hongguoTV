@@ -2,6 +2,7 @@
 package com.hongguotv.nativeapp
 
 import android.content.Context
+import androidx.media3.common.util.UnstableApi
 import com.hongguotv.core.RemoteVideo
 import org.json.JSONArray
 import org.json.JSONObject
@@ -48,6 +49,7 @@ internal data class TvDownloadTask(
  * RemoteVideo pipeline as playback; only complete app-authorized progressive streams are saved.
  * Work is serialized, persisted, cancellable and resumable after verifying the media identity.
  */
+@UnstableApi
 internal class TvDownloadManager(
     context: Context,
     private val open: (episodeId: String, seriesTitle: String, episodeNumber: Int, episodeCount: Int, source: String, maxQuality: Int) -> OpenedStream,
