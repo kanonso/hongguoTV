@@ -1466,7 +1466,7 @@ constructor(
                                     when (playbackRotationResult) { true -> "ok"; false -> "failed"; null -> "pending" }
                             }
                             throw EmptyPlaybackResponseException(
-                                (if (plan.isEmpty()) "route=cooldown" else trace.summary()) + rotation,
+                                (if (plannedRoutes.isEmpty()) "route=cooldown" else trace.summary()) + rotation,
                             )
                         }
                         throw error
