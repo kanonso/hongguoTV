@@ -247,6 +247,9 @@ internal fun openStream(
     initialBytes: Int = 256 * 1024,
     metadataAhead: List<String> = emptyList(),
     speculative: Boolean = false,
+    sourceOrder: List<String> = listOf("openhongguo", "sdk", "app", "web"),
+    enabledSources: Set<String> = setOf("app"),
+    openHongguoLadder: (() -> StreamLadder)? = null,
     supportsTrack: (VideoTracks.Track?) -> Boolean,
 ): OpenedStream? {
     fun prepare(ladder: StreamLadder): OpenedStream? {
@@ -275,48 +278,94 @@ internal fun openStream(
         return null
     }
 
-    var validation: RecentSourceValidation? = null
-    val prepareDeadline = RequestScope.deadlineAtMost(Long.MAX_VALUE)
-    val ladder = try {
-        repository.streamLadderWithCompatibility(id, metadataAhead, speculative) {
-            val cached = recentSources.find(id, maxQuality)
-            if (cached != null) {
-                val deadline = minOf(prepareDeadline, System.nanoTime() + TimeUnit.SECONDS.toNanos(2))
-                try {
-                    validation = RecentSourceValidation(id, cached, deadline, http.dispatcher.executorService) {
-                        prepare(StreamLadder(listOf(cached)))
+    fun openAppSource(): OpenedStream {
+        var validation: RecentSourceValidation? = null
+        val prepareDeadline = RequestScope.deadlineAtMost(Long.MAX_VALUE)
+        val ladder = try {
+            repository.streamLadderWithCompatibility(id, metadataAhead, speculative) {
+                val cached = recentSources.find(id, maxQuality)
+                if (cached != null) {
+                    val deadline = minOf(prepareDeadline, System.nanoTime() + TimeUnit.SECONDS.toNanos(2))
+                    try {
+                        validation = RecentSourceValidation(id, cached, deadline, http.dispatcher.executorService) {
+                            prepare(StreamLadder(listOf(cached)))
+                        }
+                    } catch (_: RejectedExecutionException) {
+                        // The playback transport may already be closing.
                     }
-                } catch (_: RejectedExecutionException) {
-                    // The playback transport may already be closing.
                 }
             }
-        }
-    } catch (problem: IOException) {
-        RequestScope.ensureActive()
-        if (problem is PlaybackSourceException) recentSources.forget(id)
-        val modelsEmpty = problem is EmptyPlaybackResponseException && problem.allPlaybackModelsEmpty
-        val backupTimedOut = problem.isPlaybackTimeout() &&
-            problem.suppressed.any { it is EmptyPlaybackResponseException }
-        if (speculative || (!modelsEmpty && !backupTimedOut)) throw problem
-        val pending = validation ?: throw problem
-        if (recentSources.find(id, maxQuality) !== pending.rendition) throw problem
-        val recovered = pending.take()
-        if (recovered == null) {
-            recentSources.forget(id, pending.rendition)
-            problem.addSuppressed(PlaybackDiagnosticException("recent-source=unavailable"))
+        } catch (problem: IOException) {
+            RequestScope.ensureActive()
+            if (problem is PlaybackSourceException) recentSources.forget(id)
+            val modelsEmpty = problem is EmptyPlaybackResponseException && problem.allPlaybackModelsEmpty
+            val backupTimedOut = problem.isPlaybackTimeout() &&
+                problem.suppressed.any { it is EmptyPlaybackResponseException }
+            if (!speculative && (modelsEmpty || backupTimedOut)) {
+                val pending = validation
+                if (pending != null && recentSources.find(id, maxQuality) === pending.rendition) {
+                    val recovered = pending.take()
+                    if (recovered != null && recentSources.find(id, maxQuality) === pending.rendition) {
+                        Log.i("HongguoTV", "Opened recently verified playback source")
+                        return recovered
+                    }
+                    recovered?.close()
+                    recentSources.forget(id, pending.rendition)
+                    problem.addSuppressed(PlaybackDiagnosticException("recent-source=unavailable"))
+                }
+            }
             throw problem
+        } finally {
+            validation?.close()
         }
-        if (recentSources.find(id, maxQuality) !== pending.rendition) {
-            recovered.close()
-            throw problem
-        }
-        Log.i("HongguoTV", "Opened recently verified playback source")
-        return recovered
-    } finally {
-        validation?.close()
+        return prepare(ladder)?.also { opened ->
+            opened.rendition?.let { recentSources.remember(id, it, maxQuality) }
+        } ?: throw IOException("官方 App 没有返回电视可播放的清晰度")
     }
-    return prepare(ladder)?.also { opened ->
-        opened.rendition?.let { recentSources.remember(id, it, maxQuality) }
+
+    fun openExternalSource(source: String): OpenedStream? = when (source) {
+        "openhongguo" -> {
+            val provider = openHongguoLadder
+            if (provider == null) {
+                Log.i("HongguoTV", "Skipping openhongguo playback source; no adapter supplied")
+                null
+            } else {
+                Log.i("HongguoTV", "Trying openhongguo Android SDK playback source")
+                prepare(provider.invoke())
+            }
+        }
+        "sdk" -> throw IOException("SDK helper 尚未提供 Android TV 原生执行档；已安全跳过")
+        "web" -> {
+            Log.i("HongguoTV", "Trying official public full MP4 playback fallback")
+            prepare(StreamLadder(listOf(repository.publicWebsiteMp4Fallback(id))))
+        }
+        else -> null
+    }
+
+    val order = (if (sourceOrder.isEmpty()) listOf("openhongguo", "sdk", "app", "web") else sourceOrder)
+        .filter { it in setOf("openhongguo", "sdk", "app", "web") }
+        .distinct()
+    val selected = order.filter { it in enabledSources }
+    val attempts = if (speculative) listOf("app").filter { it in enabledSources }
+        else selected
+    var lastFailure: Exception? = null
+
+    for (source in attempts) {
+        RequestScope.ensureActive()
+        try {
+            val opened = if (source == "app") openAppSource() else openExternalSource(source)
+            if (opened != null) return opened
+        } catch (failure: Exception) {
+            RequestScope.ensureActive()
+            if (failure is InterruptedException || failure is InterruptedIOException && failure.message == "播放请求已取消")
+                throw failure
+            lastFailure?.addSuppressed(failure)
+            if (lastFailure == null) lastFailure = failure
+            Log.i("HongguoTV", "Playback source '$source' unavailable; trying next enabled source")
+        }
+    }
+    throw (lastFailure ?: IOException("没有启用可用的播放来源")).apply {
+        addSuppressed(PlaybackDiagnosticException("source-order=${attempts.joinToString(",")}"))
     }
 }
 

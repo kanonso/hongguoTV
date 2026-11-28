@@ -208,7 +208,7 @@ class HomeScreen(
      * updateShelves.
      */
     fun updateEntry(shelfKey: String, entry: Entry): Boolean {
-        val card = cards["$shelfKey:${entry.series.id}"] ?: return false
+        val card = cards["$shelfKey:${entry.series.libraryKey}"] ?: return false
         if (card.entry?.series?.cover != entry.series.cover) {
             card.image?.setImageDrawable(null)
         }
@@ -226,7 +226,7 @@ class HomeScreen(
                 if (shelf.key == shelfKey)
                     shelf.copy(
                         entries =
-                            shelf.entries.map { if (it.series.id == entry.series.id) entry else it }
+                            shelf.entries.map { if (it.series.libraryKey == entry.series.libraryKey) entry else it }
                     )
                 else shelf
             }
@@ -303,7 +303,7 @@ class HomeScreen(
                             .toInt()
                             .coerceAtLeast(dp(100))
                     val key =
-                        if (entry != null) "${shelf.key}:${entry.series.id}"
+                        if (entry != null) "${shelf.key}:${entry.series.libraryKey}"
                         else "${shelf.key}:more"
                     val view =
                         LinearLayout(context).apply {

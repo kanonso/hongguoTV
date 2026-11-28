@@ -16,15 +16,16 @@ if __name__ == '__main__':
     spec.loader.exec_module(release)
     for directory, suffix, abis in release.APK_VARIANTS:
         apk = ROOT / 'kotlin-tv/app/build' / directory / f'outputs/apk/{kind}' / release.apk_filename(suffix, kind)
-        release.validate_apk_abis(apk, abis)
-        if not abis:
+        is_legacy_audio = suffix == 'android5'
+        release.validate_apk_abis(apk, abis, require_ffmpeg=is_legacy_audio)
+        if not is_legacy_audio:
             with zipfile.ZipFile(apk) as archive:
                 for name in archive.namelist():
                     if name.endswith('.dex') and b'Landroidx/media3/decoder/ffmpeg/' in archive.read(name):
                         raise ValueError(f'{apk}: unexpected FFmpeg Java dependency')
         aapt = Path(os.environ['ANDROID_HOME']) / 'build-tools/36.0.0/aapt'
         badging = subprocess.check_output([str(aapt), 'dump', 'badging', str(apk)], text=True)
-        expected = 21 if abis else 23
+        expected = 21 if is_legacy_audio else 23
         if f"sdkVersion:'{expected}'" not in badging:
             raise ValueError(f'{apk}: incorrect minimum SDK')
         print(f'{suffix}: minSdk={expected}, native ABIs={sorted(abis)}, bytes={apk.stat().st_size}')

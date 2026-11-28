@@ -58,8 +58,12 @@ data class BackupData(
 object LibraryBackup {
     const val MAX_BYTES = 2 * 1024 * 1024
     private val idPattern = Regex("[0-9]{1,30}")
+    private val libraryKeyPattern = Regex("(?:[a-z0-9_-]{1,32}:)?[0-9]{1,30}")
 
     private fun id(value: String) = value.also { require(idPattern.matches(it)) { "剧集标识无效" } }
+
+    private fun libraryKey(value: String) =
+        value.also { require(libraryKeyPattern.matches(it)) { "本机片库标识无效" } }
 
     private fun cleanCover(value: String): String =
         runCatching {
@@ -111,7 +115,7 @@ object LibraryBackup {
                     JSONArray(
                         data.watched
                             .intersect(
-                                (data.favorites.map { it.id } + data.history.map { it.series.id })
+                                (data.favorites.map { it.libraryKey } + data.history.map { it.series.libraryKey })
                                     .toSet()
                             )
                             .take(500)
@@ -164,6 +168,7 @@ object LibraryBackup {
             "",
             o.string("badge", 100),
             o.string("tags", 200),
+            o.optString("source", "hongguo").takeIf { it.matches(Regex("[a-z0-9_-]{1,32}")) } ?: "hongguo",
         )
 
     fun decode(value: String): BackupData {
@@ -188,7 +193,7 @@ object LibraryBackup {
             "不支持的备份格式或版本"
         }
         val later = if (o.has("later")) o.rows("later", 100).map(::series) else emptyList()
-        require(later.distinctBy { it.id }.size == later.size) { "稍后看包含重复剧集" }
+        require(later.distinctBy { it.libraryKey }.size == later.size) { "稍后看包含重复剧集" }
         val hidden = if (o.has("hidden")) o.getJSONArray("hidden") else JSONArray()
         require(hidden.length() <= 500)
         val hiddenIds = (0 until hidden.length()).map { id(hidden.getString(it)) }.toSet()
@@ -209,14 +214,14 @@ object LibraryBackup {
                 )
             }
         require(
-            favorites.distinctBy { it.id }.size == favorites.size &&
-                history.distinctBy { it.series.id }.size == history.size
+            favorites.distinctBy { it.libraryKey }.size == favorites.size &&
+                history.distinctBy { it.series.libraryKey }.size == history.size
         ) {
             "备份包含重复剧集"
         }
         val watched = o.getJSONArray("watched")
         require(watched.length() <= 500)
-        val watchedIds = (0 until watched.length()).map { id(watched.getString(it)) }.toSet()
+        val watchedIds = (0 until watched.length()).map { libraryKey(watched.getString(it)) }.toSet()
         val searches =
             o.rows("searches", 20).map { row ->
                 RecentSearch(
@@ -253,11 +258,11 @@ object LibraryBackup {
 
     /** Existing favorites stay first; only newer imported progress replaces a local record. */
     fun merge(local: BackupData, incoming: BackupData, restoreSettings: Boolean): BackupData {
-        val favorites = (local.favorites + incoming.favorites).distinctBy { it.id }.take(500)
-        val records = local.history.associateBy { it.series.id }.toMutableMap()
+        val favorites = (local.favorites + incoming.favorites).distinctBy { it.libraryKey }.take(500)
+        val records = local.history.associateBy { it.series.libraryKey }.toMutableMap()
         val watched = local.watched.toMutableSet()
         incoming.history.forEach { candidate ->
-            val id = candidate.series.id
+            val id = candidate.series.libraryKey
             val prior = records[id]
             if (prior == null || candidate.updatedAt > prior.updatedAt) {
                 records[id] = candidate
@@ -265,17 +270,17 @@ object LibraryBackup {
             }
         }
         incoming.watched
-            .filter { id -> id !in records && local.favorites.none { it.id == id } }
+            .filter { id -> id !in records && local.favorites.none { it.libraryKey == id } }
             .forEach { watched.add(it) }
         val history = records.values.sortedByDescending { it.updatedAt }.take(200)
-        val retained = (favorites.map { it.id } + history.map { it.series.id }).toSet()
+        val retained = (favorites.map { it.libraryKey } + history.map { it.series.libraryKey }).toSet()
         return BackupData(
             favorites,
             history,
             watched.intersect(retained).take(500).toSet(),
             (local.searches + incoming.searches).distinct().take(20),
             if (restoreSettings) incoming.settings else local.settings,
-            (local.later + incoming.later).distinctBy { it.id }.take(100),
+            (local.later + incoming.later).distinctBy { it.libraryKey }.take(100),
             (local.hidden + incoming.hidden).take(500).toSet(),
         )
     }

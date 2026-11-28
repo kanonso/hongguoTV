@@ -642,6 +642,11 @@ class PlaybackQueueTest {
     fun aSlowPrefetchLeavesTimeForForegroundPlayback() =
         fixture { activity, _, library, opened ->
             val metadataRequests = blockDuplicateMetadataRequests(activity)
+            // This test covers the App prefetch handoff only; do not let the unrelated web fallback
+            // add a second request after the deliberately blocked App metadata request.
+            val sourceSettings = invoke(activity, "getPlaybackSourceSettings") as PlaybackSourceSettings
+            sourceSettings.setEnabled("openhongguo", false)
+            sourceSettings.setEnabled("web", false)
             @Suppress("UNCHECKED_CAST")
             val slot = get(activity, "preparedNext") as PreparedSlot<OpenedStream>
             val key = "102:${library.maxQuality}"

@@ -1,0 +1,55 @@
+name: Verify OpenHongguo 16KB-aligned Android AAR
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/openhongguo-16kb.yml"
+      - "kotlin-tv/tools/build_openhongguo_16kb.sh"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GOMOBILE_VERSION: v0.0.0-20261011034528-197770444867
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: beilunyang/openhongguo
+          ref: v0.4.1
+          path: _work/openhongguo
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: _work/openhongguo/bindings/mobile/core/go.mod
+          cache: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+        with:
+          packages: platform-tools
+      - name: Install pinned Android SDK and NDK
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006"
+      - name: Install pinned gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@$GOMOBILE_VERSION golang.org/x/mobile/cmd/gobind@$GOMOBILE_VERSION
+          gomobile init
+      - name: Rebuild and verify OpenHongguo 16KB ELF alignment
+        env:
+          OPENHONGGUO_SOURCE_DIR: ${{ github.workspace }}/_work/openhongguo
+          OPENHONGGUO_OUT_DIR: outputs/openhongguo-16kb
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.1.12297006"
+          bash kotlin-tv/tools/build_openhongguo_16kb.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: openhongguo-0.4.1-android-16kb-verified
+          path: outputs/openhongguo-16kb/
+          if-no-files-found: error
+          retention-days: 30

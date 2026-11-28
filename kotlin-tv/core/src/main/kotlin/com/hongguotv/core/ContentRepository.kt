@@ -3,7 +3,9 @@ package com.hongguotv.core
 
 // 内容数据访问入口：封装搜索、详情与播放信息请求；界面层通过此处获取内容数据。
 
+import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.util.zip.GZIPOutputStream
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -12,6 +14,7 @@ import okhttp3.CookieJar
 import okhttp3.ConnectionPool
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -61,7 +64,12 @@ data class Series(
     val description: String = "",
     val badge: String = "",
     val tags: String = "",
+    val source: String = "hongguo",
 ) {
+    /** Stable local key; keep legacy Hongguo IDs unchanged for existing library data. */
+    val libraryKey: String
+        get() = if (source == "hongguo") id else "$source:$id"
+
     fun toJson() =
         JSONObject()
             .put("id", id)
@@ -70,6 +78,7 @@ data class Series(
             .put("description", description)
             .put("badge", badge)
             .put("tags", tags)
+            .put("source", source)
 
     companion object {
         fun fromJson(o: JSONObject) =
@@ -80,11 +89,12 @@ data class Series(
                 o.str("description"),
                 o.str("badge"),
                 o.str("tags"),
+                o.str("source").takeIf { it.matches(Regex("[a-z0-9_-]{1,32}")) } ?: "hongguo",
             )
     }
 }
 
-data class Detail(val series: Series, val episodes: List<String>)
+data class Detail(val series: Series, val episodes: List<String>, val episodeSource: String = series.source)
 
 data class RankPosition(val rank: Int?, val heat: String, val metrics: String = "")
 
@@ -104,7 +114,7 @@ data class CatalogPage(
     val trialHints: Map<String, TrialHint> = emptyMap(),
 )
 
-data class StreamInfo(val url: String, val key: ByteArray?, val quality: String, val backupUrl: String? = null)
+data class StreamInfo(val url: String, val key: ByteArray?, val quality: String, val backupUrl: String? = null, val source: String = "app")
 
 /** One playable rendition; width/height are the coded dimensions when the API reports them. */
 data class Rendition(
@@ -115,8 +125,9 @@ data class Rendition(
     val url: String,
     val key: ByteArray?,
     val backupUrl: String? = null,
+    val source: String = "app",
 ) {
-    fun toStreamInfo() = StreamInfo(url, key, if (quality > 0) "${quality}P" else "自动", backupUrl)
+    fun toStreamInfo() = StreamInfo(url, key, if (quality > 0) "${quality}P" else "自动", backupUrl, source)
 }
 
 /**
@@ -192,6 +203,7 @@ constructor(
     private val clock: () -> Long = System::currentTimeMillis,
     private val playbackSession: PlaybackDeviceSession = PlaybackDeviceSession(),
     private val sleep: (Long) -> Unit = Thread::sleep,
+    private val playbackStrategy: () -> PlaybackStrategyPolicy? = { null },
 ) {
     // 签名时钟与应用时钟同源：测试可注入，重签后的 ts/_rticket 保持在同一时间基上。
     private val signer = Signer(clock)
@@ -270,6 +282,86 @@ constructor(
         }
     }
 
+    private fun strategyRoute(id: String): PlaybackStrategyRoute? =
+        playbackStrategy()?.routes?.firstOrNull { it.id == id && it.enabled }
+
+    private fun hasStrategyRoute(id: String): Boolean =
+        playbackStrategy()?.routes?.any { it.id == id } == true
+
+    private fun disabledStrategyRoute(id: String): Boolean =
+        playbackStrategy()?.routes?.any { it.id == id && !it.enabled } == true
+
+    private fun strategyRequest(
+        route: PlaybackStrategyRoute,
+        defaultUrl: String,
+        identity: PlaybackDeviceSession.Profile,
+        baseValues: Map<String, String>,
+        originalBody: ByteArray?,
+    ): Request.Builder {
+        val now = clock()
+        val profile = identity.values + mapOf(
+            "version_code" to "73932",
+            "manifest_version_code" to "73932",
+            "update_version_code" to "73932",
+            "pv_player" to "73932",
+            "version_name" to "7.3.9.32",
+        )
+        val values = route.mergeQueryValues(profile + baseValues)
+        val url = route.url ?: defaultUrl
+        // The official App strategy protocol signs and posts the exact gzip bytes.
+        val body = route.applyBodyOverrides(originalBody)?.let { json ->
+            ByteArrayOutputStream().also { output ->
+                GZIPOutputStream(output).use { gzip -> gzip.write(json) }
+            }.toByteArray()
+        }
+        val query = Signer.encode(values + ("_rticket" to now.toString()))
+        val requestHeaders = linkedMapOf<String, String>()
+        route.applyHeaders(requestHeaders)
+        val builder = when (route.auth) {
+            "v5" -> {
+                val signed = MobilePlayback.signer.signWithField21(
+                    "$url?$query",
+                    body ?: ByteArray(0),
+                    identity.values,
+                    route.field21,
+                )
+                Request.Builder().url(signed.url)
+                    .header("User-Agent", requestHeaders["User-Agent"] ?: "okhttp/4.12.0")
+                    .header("Accept", requestHeaders["Accept"] ?: "application/json")
+                    .apply { signed.headers.forEach { (key, value) -> header(key, value) } }
+            }
+            "player" -> {
+                val signingHeaders = PlayerSignature().headers(
+                    query, body, identity.values.getValue("device_id"), now,
+                )
+                Request.Builder().url("$url?$query")
+                    .header("User-Agent", requestHeaders["User-Agent"] ?: VendorConstants.VIDEO_UA)
+                    .header("Accept", requestHeaders["Accept"] ?: "application/json; charset=utf-8")
+                    .header("Sdk-Version", "2")
+                    .header("X-XS-From-Web", "0")
+                    .header("passport-sdk-version", "5051452")
+                    .header("x-ss-dp", values["aid"] ?: "8662")
+                    .apply { signingHeaders.forEach { (key, value) -> header(key, value) } }
+            }
+            "none" -> {
+                val noSignatureQuery = Signer.encode(values + mapOf(
+                    "ts" to (now / 1000L).toString(),
+                    "_rticket" to now.toString(),
+                ))
+                Request.Builder().url("$url?$noSignatureQuery")
+                    .header("User-Agent", requestHeaders["User-Agent"] ?: VendorConstants.VIDEO_UA)
+                    .header("Accept", requestHeaders["Accept"] ?: "application/json")
+            }
+            else -> throw IOException("策略签名族不受支持")
+        }
+        if (body != null) {
+            builder.header("Content-Type", "application/json; charset=UTF-8")
+                .header("Content-Encoding", "gzip")
+                .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+        }
+        return builder
+    }
+
     // 构造内容请求：站点 UA 与语言头在前，签名头按序覆盖；供 text() 与播放信息重试循环共用。
     private fun signedRequest(url: String, signed: Signer.Request?): Request.Builder {
         val request =
@@ -298,7 +390,9 @@ constructor(
         identity: PlaybackDeviceSession.Profile,
         extra: Map<String, String> = emptyMap(),
         body: ByteArray? = null,
+        route: PlaybackStrategyRoute? = null,
     ): Request.Builder {
+        if (route != null) return strategyRequest(route, base, identity, extra, body)
         val profile = identity.values + mapOf(
             "version_code" to "73932", "manifest_version_code" to "73932",
             "update_version_code" to "73932", "pv_player" to "73932",
@@ -312,8 +406,13 @@ constructor(
     }
 
     /** 单集播放协议使用真实 Gorgon/Argus/Ladon；不能混用旧 Medusa 签名或账户 Cookie。 */
-    private fun singleVideoModel(id: String, identity: PlaybackDeviceSession.Profile,
-        trace: PlaybackRequestTrace, client: OkHttpClient): JSONObject {
+    private fun singleVideoModel(
+        id: String,
+        identity: PlaybackDeviceSession.Profile,
+        trace: PlaybackRequestTrace,
+        client: OkHttpClient,
+        strategyRoute: PlaybackStrategyRoute? = null,
+    ): JSONObject {
         val now = clock()
         val allowed = setOf("ac", "channel", "aid", "app_name", "version_code", "version_name",
             "device_platform", "os", "ssmix", "device_type", "device_brand", "language", "os_api",
@@ -321,15 +420,26 @@ constructor(
         val profile = identity.values.filterKeys { it in allowed } + mapOf(
             "version_code" to "73532", "version_name" to "7.3.5.32", "manifest_version_code" to "73532",
             "update_version_code" to "73532", "_rticket" to now.toString())
-        val query = Signer.encode(profile.toSortedMap())
-        val payload = """{"biz_param":{"need_all_video_definition":true,"video_platform":3},"content_type":1,"video_id":"$id"}""".toByteArray()
-        val request = Request.Builder()
-            .url("https://${PlayRetryPlan.host(0)}/novel/player/video_model/v1/?$query")
-            .header("User-Agent", VendorConstants.VIDEO_UA.replace("/71332", "/73532"))
-            .header("Accept", "application/json").header("Sdk-Version", "2").header("X-XS-From-Web", "0")
-            .post(payload.toRequestBody("application/json; charset=utf-8".toMediaType()))
-        PlayerSignature().headers(query, payload, identity.values.getValue("device_id"), now)
-            .forEach { (key, value) -> request.header(key, value) }
+        val payload = """{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"from_video_id":"","need_all_video_definition":true,"need_mp4_align":false,"source":9,"use_os_player":false,"use_server_dns":false,"video_platform":3},"content_type":1,"video_id":"$id"}""".toByteArray()
+        val request = if (strategyRoute != null) {
+            strategyRequest(
+                strategyRoute,
+                "https://" + PlayRetryPlan.host(0) + "/novel/player/video_model/v1/",
+                identity,
+                profile,
+                payload,
+            )
+        } else {
+            val query = Signer.encode(profile.toSortedMap())
+            val builder = Request.Builder()
+                .url("https://" + PlayRetryPlan.host(0) + "/novel/player/video_model/v1/?$query")
+                .header("User-Agent", VendorConstants.VIDEO_UA.replace("/71332", "/73532"))
+                .header("Accept", "application/json").header("Sdk-Version", "2").header("X-XS-From-Web", "0")
+                .post(payload.toRequestBody("application/json; charset=utf-8".toMediaType()))
+            PlayerSignature().headers(query, payload, identity.values.getValue("device_id"), now)
+                .forEach { (key, value) -> builder.header(key, value) }
+            builder
+        }
         // The caller may have a catalogue cookie jar; this protocol must remain anonymous.
         val anonymous = client.newBuilder().cookieJar(okhttp3.CookieJar.NO_COOKIES).build()
         val raw = fetchPlaybackModel(request, anonymous, trace, PlaybackRequestTrace.Stage.SINGLE)
@@ -556,18 +666,45 @@ constructor(
         return CatalogPage(items, items.isNotEmpty() && page < info.totalPages, discovery = info)
     }
 
-    // 按内容类型执行关键词搜索；分页状态由对应的搜索实现维护。
+    // Query the App and public website independently on every page. App results alone
+    // are not considered complete: website indexing can expose seasons absent from the TV tab.
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(keyword.isNotBlank() && keyword.length <= 80 && page in 1..100)
-        // The website search does not constrain content type. Never use it for comics.
+        // Motion comics use their own signed App tab and cursor contract. Never mix them with
+        // the website's short-drama result set.
         if (type == ContentType.COMIC) return appSearch(keyword, page, type)
+        var appPage: CatalogPage? = null
+        var appFailure: Exception? = null
+        var websitePage: CatalogPage? = null
+        var websiteFailure: Exception? = null
+
         try {
-            val result = appSearch(keyword, page, type)
-            if (result.items.isNotEmpty() || !result.hasMore) return result
-        } catch (e: Exception) {
-            if (e is SearchSessionExpiredException) throw e
-            /* Website fallback for short dramas only. */ }
-        return searchAll(keyword, page, type)
+            appPage = appSearch(keyword, page, type)
+        } catch (problem: Exception) {
+            if (problem is SearchSessionExpiredException || problem is InterruptedException || Thread.currentThread().isInterrupted) throw problem
+            appFailure = problem
+        }
+        try {
+            websitePage = searchAll(keyword, page, type)
+        } catch (problem: Exception) {
+            if (problem is InterruptedException || Thread.currentThread().isInterrupted) throw problem
+            websiteFailure = problem
+        }
+
+        if (appPage == null && websitePage == null) {
+            val detail = listOfNotNull(appFailure?.message, websiteFailure?.message).distinct()
+                .joinToString("；").ifBlank { "搜索服务暂不可用" }
+            throw IOException("$detail，请稍后重试", appFailure ?: websiteFailure)
+        }
+        val merged = SearchPayload.merge(
+            appPage?.items.orEmpty(),
+            websitePage?.items.orEmpty(),
+            keyword,
+        )
+        return CatalogPage(
+            valid(merged),
+            appPage?.hasMore == true || websitePage?.hasMore == true,
+        )
     }
 
     /** Anonymous first-party website suggestions; pinyin matching is provided by the server. */
@@ -615,7 +752,7 @@ constructor(
             type == null || genre == (if (type == ContentType.COMIC) "205" else "203") ||
                 (type == ContentType.SHORT && genre.isBlank())
         }
-        val items = SearchPayload.prioritize(valid(filtered.map(::card)), keyword)
+        val items = SearchPayload.filterTextMatches(valid(filtered.map(::card)), keyword)
         val more =
             when {
                 section.has("hasMore") -> section.optBoolean("hasMore")
@@ -671,55 +808,13 @@ constructor(
                 values,
             )
         val data = JSONObject(text(signed.url, signed))
-        if (data.optInt("code", -1) != 0) throw IOException("搜索接口暂不可用")
-        val tabs =
-            data.optJSONArray("search_tabs")
-                ?: data.optJSONObject("data")?.optJSONArray("search_tabs")
-                ?: throw IOException("搜索格式异常")
-        val tab =
-            tabs.objects().firstOrNull { it.optInt("tab_type") == type.searchTab }
-                ?: throw IOException("${type.label}搜索暂不可用")
-        val list = mutableListOf<Series>()
-        for (cell in (tab.optJSONArray("data") ?: JSONArray()).objects()) {
-            val cells = mutableListOf(cell)
-            runCatching { JSONObject(cell.str("lynx_data")).optJSONArray("cell_data")?.objects() }
-                .getOrNull()
-                ?.let { cells.addAll(it) }
-            for (row in cells) {
-                val video = row.optJSONArray("video_data")?.objects()?.firstOrNull() ?: continue
-                val id =
-                    video.str("series_id").ifEmpty {
-                        row.str("book_id").ifEmpty { row.str("search_result_id") }
-                    }
-                val title =
-                    row.optJSONObject("search_high_light")
-                        ?.optJSONObject("title")
-                        ?.str("text")
-                        .orEmpty()
-                        .ifEmpty { video.str("title").ifEmpty { row.str("cell_name") } }
-                val count = video.optInt("episode_cnt")
-                list +=
-                    Series(
-                        id,
-                        title,
-                        cleanUrl(video.str("cover").ifEmpty { video.str("cover_url") }),
-                        video.str("video_desc"),
-                        if (count > 0) "全 $count 集" else video.str("rec_text"),
-                        video.str("sub_title"),
-                    )
-            }
-        }
+        val parsed = SearchPayload.parse(data.toString(), type, keyword)
         synchronized(searchCursors) {
             searchCursors[Triple(type, keyword, page)] =
-                SearchCursor(
-                    tab.str("search_id"),
-                    tab.str("passback"),
-                    tab.str("next_offset").toIntOrNull(),
-                    clock(),
-                )
+                SearchCursor(parsed.searchId, parsed.passback, parsed.nextOffset, clock())
             while (searchCursors.size > 100) searchCursors.remove(searchCursors.keys.first())
         }
-        return CatalogPage(valid(list), tab.optBoolean("has_more", false) && page < 100)
+        return CatalogPage(valid(parsed.items), parsed.hasMore && page < 100)
     }
 
     private val producerCredits = linkedMapOf<String, ProducerCredit>()
@@ -906,13 +1001,20 @@ constructor(
             "use_os_player" to "0", "video_platform" to "1024", "source" to "0",
             "from_video_id" to "",
         )
-        // One preferred request; the legacy path retains the bounded cross-host retry budget.
+        // One preferred request; the signed strategy pack may update only this allowlisted route.
+        val configuredRoute = strategyRoute("video_tab")
+        if (playbackStrategy() != null && configuredRoute == null) return null
         for (host in listOf(PlayRetryPlan.hosts.first())) {
-            val request = if (mobileV5) MobilePlayback.videoTabRequest(id, identity.values, host, clock())
-            else playbackRequest(
-                "https://$host/reading/bookapi/video_tab/multi_video_model/v1/",
-                identity, extra,
-            )
+            val defaultUrl = "https://$host/reading/bookapi/video_tab/multi_video_model/v1/"
+            val request = when {
+                mobileV5 && configuredRoute != null ->
+                    MobilePlayback.videoTabRequest(id, identity.values, host, clock(), strategyRoute = configuredRoute)
+                mobileV5 ->
+                    MobilePlayback.videoTabRequest(id, identity.values, host, clock())
+                configuredRoute != null ->
+                    strategyRequest(configuredRoute, defaultUrl, identity, extra, null)
+                else -> playbackRequest(defaultUrl, identity, extra)
+            }
             val text =
                 try {
                     fetchPlaybackModel(request, transport, trace, PlaybackRequestTrace.Stage.GET)
@@ -1001,8 +1103,14 @@ constructor(
             val profile = if (speculative) playbackSession.existing()
                 ?: throw IOException("播放设备尚未就绪") else playbackSession.profile(http)
             try {
-                MobilePlayback.ladder(id, profile.values, http, MobilePlayback.signer, clock())
-                    .also { profile.recordPlayablePrimaryModel() }
+                val preloadRoute = strategyRoute("preload_current")
+                if (playbackStrategy() != null && preloadRoute == null) {
+                    throw EmptyPlaybackResponseException("route=preload_current_unavailable")
+                }
+                MobilePlayback.ladder(
+                    id, profile.values, http, MobilePlayback.signer, clock(),
+                    strategyRoute = preloadRoute,
+                ).also { profile.recordPlayablePrimaryModel() }
             } catch (empty: EmptyPlaybackResponseException) {
                 profile.recordEmptyPrimaryModel(clock())
                 if (speculative) throw empty
@@ -1036,10 +1144,18 @@ constructor(
                 if (rows.isNotEmpty()) return@withDeadline StreamLadder(rows)
 
                 // The tab model can contain only bytevc2. The mobile model on the same host can supply HEVC.
-                val alternateHost = PlayRetryPlan.host(0)
+                val activePolicy = playbackStrategy()
+                val alternateRoute = activePolicy?.orderedRoutes()
+                    ?.firstOrNull { it.id in setOf("player_b", "player_a") }
+                if (activePolicy != null && alternateRoute == null) {
+                    throw IOException("策略包未启用兼容播放器路线")
+                }
+                val alternateHost = alternateRoute?.url?.toHttpUrlOrNull()?.host ?: PlayRetryPlan.host(0)
                 try {
                     MobilePlayback.ladder(
-                        id, profile.values, http, MobilePlayback.signer, clock(), host = alternateHost,
+                        id, profile.values, http, MobilePlayback.signer, clock(),
+                        host = alternateHost,
+                        strategyRoute = alternateRoute,
                     )
                 } catch (alternate: IOException) {
                     RequestScope.ensureActive()
@@ -1053,6 +1169,65 @@ constructor(
                 }
             }
         }
+
+    /**
+     * Official public full-MP4 fallback. It only accepts the public endpoint's complete media URL;
+     * preview-only pages, non-HTTPS hosts, redirects, expired URLs and protected-playback denials
+     * are not bypassed. Returned media is unencrypted H.264 and can use the normal RemoteVideo path.
+     */
+    fun publicWebsiteMp4Fallback(vid: String): Rendition {
+        require(vid.matches(Regex("[0-9]{1,30}"))) { "分集编号无效" }
+        val endpoint = "$site/api/video/protected/fallback-play-info"
+        val body = JSONObject().put("item_id", vid)
+            .toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+        val request = Request.Builder()
+            .url(endpoint)
+            .post(body)
+            .header("User-Agent", "Mozilla/5.0")
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .header("Referer", "$site/")
+            .build()
+        val client = http.newBuilder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .callTimeout(8, TimeUnit.SECONDS)
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (response.code != 200) throw ContentHttpException(response.code)
+            val responseBody = response.body ?: throw IOException("官网公开兜底未返回内容")
+            if (responseBody.contentLength() > 64 * 1024) throw IOException("官网公开兜底响应过大")
+            val bytes = responseBody.bytes()
+            if (bytes.isEmpty() || bytes.size > 64 * 1024) throw IOException("官网公开兜底响应为空或过大")
+            val payload = try { JSONObject(String(bytes, Charsets.UTF_8)) }
+                catch (problem: Exception) { throw IOException("官网公开兜底响应格式异常", problem) }
+            val code = payload.optJSONObject("base_resp")?.optInt("StatusCode", payload.optInt("code", 0))
+                ?: payload.optInt("code", 0)
+            if (code != 0) throw IOException("官网公开片源暂不可用")
+            val rawUrl = cleanUrl(payload.str("main_url"))
+            val media = try { rawUrl.toHttpUrl() } catch (problem: Exception) {
+                throw IOException("官网公开片源地址无效", problem)
+            }
+            val allowedHosts = listOf("qznovelvod.com", "fqnovelvod.com", "douyinvod.com")
+            if (media.scheme != "https" || media.username.isNotEmpty() || media.password.isNotEmpty() ||
+                media.port != 443 || allowedHosts.none { media.host == it || media.host.endsWith(".$it") }) {
+                throw IOException("官网公开片源未通過安全校验")
+            }
+            val expiry = payload.optLong("url_expire", 0L)
+            if (expiry > 0 && expiry * 1000L <= clock() + 5_000L) {
+                throw IOException("官网公开片源地址已过期")
+            }
+            return Rendition(
+                quality = 360,
+                codec = "h264",
+                width = 360,
+                height = 640,
+                url = media.toString(),
+                key = null,
+                source = "web",
+            )
+        }
+    }
 
     /** Retained legacy transport for compatibility regression coverage. */
     internal fun legacyStreamLadderWithCompatibility(id: String, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): StreamLadder {
@@ -1193,46 +1368,68 @@ constructor(
                         }
                         return playbackSession.profile(transport())
                     }
-                    val shouldRefresh = !speculative && (synchronized(playbackIdentityLock) {
+                    val signedPolicy = playbackStrategy()
+                    val shouldRefresh = signedPolicy == null && !speculative && (synchronized(playbackIdentityLock) {
                         emptyPlaybackRounds >= IDENTITY_ROTATE_ROUNDS
                     } || previousIdentity.routes.exhausted(clock()))
                     var identity = if (shouldRefresh) refreshIdentity(previousIdentity) else previousIdentity
-                    val plan = identity.routes.plan(clock(), speculative)
-                    val pendingRoutes = java.util.ArrayDeque(plan)
+                    val routeIds = setOf("model_0", "model_1", "player_b", "player_a", "legacy")
+                    data class PlannedRoute(val transport: PlaybackRoutes.Route, val policy: PlaybackStrategyRoute?)
+                    val plannedRoutes: List<PlannedRoute> = if (signedPolicy != null) {
+                        signedPolicy.orderedRoutes().filter { it.id in routeIds }.map { policyRoute ->
+                            val host = policyRoute.url?.toHttpUrl()?.host ?: when (policyRoute.id) {
+                                "player_b", "legacy" -> PlayRetryPlan.hosts[0]
+                                "player_a", "model_0" -> PlayRetryPlan.hosts.getOrElse(1) { PlayRetryPlan.host(0) }
+                                "model_1" -> PlayRetryPlan.hosts.getOrElse(2) { PlayRetryPlan.host(0) }
+                                else -> PlayRetryPlan.host(0)
+                            }
+                            PlannedRoute(
+                                PlaybackRoutes.Route(single = policyRoute.id.startsWith("model_"), host = host),
+                                policyRoute,
+                            )
+                        }
+                    } else {
+                        identity.routes.plan(clock(), speculative).map { PlannedRoute(it, null) }
+                    }
+                    val pendingRoutes = java.util.ArrayDeque(plannedRoutes)
                     val payload =
                         """{"biz_param":{"detail_page_version":0,"device_level":1,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":${JSONArray(ids)}}}"""
                             .toByteArray()
                     var current: JSONObject? = null
                     var responseMap: JSONObject? = null
                     var lastError: IOException? = null
-                    var allEmpty = plan.isNotEmpty()
+                    var allEmpty = plannedRoutes.isNotEmpty()
                     var postCount = 0
                     var emptyPosts = 0
                     var attempts = 0
-                    while (attempts < (if (speculative) 1 else 4)) {
+                    val attemptLimit = if (speculative) 1 else if (signedPolicy != null) plannedRoutes.size else 4
+                    while (attempts < attemptLimit) {
                         if (pendingRoutes.isEmpty()) {
-                            // 已知路径全部为空时，在本轮剩余额度内恢复身份，不先弹错误再重跑整轮。
-                            if (!speculative && identity.routes.exhausted(clock())) {
+                            // Only the built-in route planner uses local cooldown/identity recovery.
+                            if (signedPolicy == null && !speculative && identity.routes.exhausted(clock())) {
                                 val replacement = refreshIdentity(identity)
                                 if (replacement !== identity) {
                                     identity = replacement
-                                    pendingRoutes.addAll(identity.routes.plan(clock(), false))
+                                    pendingRoutes.addAll(identity.routes.plan(clock(), false).map { PlannedRoute(it, null) })
                                 }
                             }
                             if (pendingRoutes.isEmpty()) break
                         }
-                        val route = pendingRoutes.removeFirst()
+                        val planned = pendingRoutes.removeFirst()
+                        val route = planned.transport
                         val attempt = attempts++
                         val client = transport(fresh = attempt > 0)
                         if (!route.single) postCount++
                         try {
                             val row = if (route.single) {
-                                singleVideoModel(id, identity, trace, client)
+                                singleVideoModel(id, identity, trace, client, planned.policy)
                             } else {
-                                val request = playbackRequest(
-                                    "https://${route.host}/novel/player/multi_video_model/v1/",
-                                    identity, body = payload,
-                                )
+                                val defaultUrl = "https://" + route.host + "/novel/player/multi_video_model/v1/"
+                                val request = if (planned.policy != null) {
+                                    strategyRequest(planned.policy, defaultUrl, identity, emptyMap(), payload)
+                                } else {
+                                    playbackRequest(defaultUrl, identity, body = payload)
+                                }
                                 val body = fetchPlaybackModel(request, client, trace, PlaybackRequestTrace.Stage.POST)
                                 val data = try { JSONObject(body) } catch (_: Exception) {
                                     throw IOException("播放信息格式异常")
@@ -1252,7 +1449,7 @@ constructor(
                             current = row
                             RequestScope.ensureActive()
                             identity.offerModel(id, row, playbackModelOwner, clock())
-                            identity.routes.success(route, clock())
+                            if (planned.policy == null) identity.routes.success(route, clock())
                             if (!speculative) resetPlaybackFailures()
                             break
                         } catch (error: IOException) {
@@ -1264,8 +1461,11 @@ constructor(
                             val empty = error is EmptyPlaybackResponseException
                             allEmpty = allEmpty && empty
                             if (!route.single && empty) emptyPosts++
-                            if (route.single || empty || PlayRetryPlan.temporary(error)) identity.routes.failed(route, clock(), empty)
-                            // 单集接口明确不支持该参数时可回退；拒绝/限流已在上方停止。批量格式错误不盲试。
+                            if (planned.policy == null &&
+                                (route.single || empty || PlayRetryPlan.temporary(error))) {
+                                identity.routes.failed(route, clock(), empty)
+                            }
+                            // 单集接口明确不支持该参数时可回退；拒绝/限流已在上方停止。
                             if (!route.single && !PlayRetryPlan.temporary(error)) throw error
                         } finally {
                             if (attempt > 0) client.connectionPool.evictAll()
@@ -1283,7 +1483,7 @@ constructor(
                                     when (playbackRotationResult) { true -> "ok"; false -> "failed"; null -> "pending" }
                             }
                             throw EmptyPlaybackResponseException(
-                                (if (plan.isEmpty()) "route=cooldown" else trace.summary()) + rotation,
+                                (if (plannedRoutes.isEmpty()) "route=cooldown" else trace.summary()) + rotation,
                             )
                         }
                         throw error

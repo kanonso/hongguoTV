@@ -25,6 +25,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.ui.PlayerView
+import androidx.media3.transformer.*
 import com.hongguotv.core.*
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -40,7 +41,58 @@ class MainActivity : Activity() {
     private val muted get() = TvStyle.muted
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newFixedThreadPool(3)
-    private val repository = ContentRepository(playbackSession = PlaybackDeviceSession.shared)
+    private val playbackStrategyPack by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        PlaybackStrategyPackManager(applicationContext)
+    }
+    private val repository = ContentRepository(
+        playbackSession = PlaybackDeviceSession.shared,
+        playbackStrategy = { playbackStrategyPack.policy() },
+    )
+    private var strategyCheckRunning = false
+    private val strategyPackCheckRunnable = object : Runnable {
+        override fun run() {
+            if (isFinishing || isDestroyed) return
+            checkPlaybackStrategyPack(force = false) {}
+            main.postDelayed(this, PlaybackStrategyPackManager.CHECK_INTERVAL_MS)
+        }
+    }
+
+    private fun checkPlaybackStrategyPack(force: Boolean, finished: (PlaybackStrategyStatus) -> Unit) {
+        if (strategyCheckRunning) return
+        strategyCheckRunning = true
+        io.execute {
+            val status = runCatching { playbackStrategyPack.check(force) }
+                .getOrElse { failure ->
+                    playbackStrategyPack.status().copy(error = failure.message ?: "策略更新检查失败")
+                }
+            main.post {
+                strategyCheckRunning = false
+                finished(status)
+            }
+        }
+    }
+
+    private fun strategyStatusText(status: PlaybackStrategyStatus): String {
+        val issued = status.issuedAt.ifBlank { "内置默认" }
+        val checked = if (status.lastCheckAt > 0) {
+            java.text.DateFormat.getDateTimeInstance().format(java.util.Date(status.lastCheckAt))
+        } else "尚未检查"
+        return "策略版本：${status.revision} · 路由：${status.routeCount} 条 · 来源：${status.source}\n发布时间：$issued\n最近检查：$checked\n" +
+            (status.error.takeIf { it.isNotBlank() }?.let { "状态：$it" } ?: "签名校验：已启用")
+    }
+    private val playbackSourceSettings by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        PlaybackSourceSettings(applicationContext, openHongguoAdapter.isRuntimeAvailable)
+    }
+    // Application-scoped queue: downloads must not retain or depend on this Activity.
+    private val downloadManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        TvDownloadRuntime.get(applicationContext, schedulePending = true)
+    }
+    private var activeSeasonMerge: Transformer? = null
+    private var activeSeasonMergePoll: Runnable? = null
+
+    private val openHongguoAdapter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        OpenHongguoAdapter(applicationContext)
+    }
     private val phoneCatalog by lazy {
         PhoneControlCatalog(library, cloudAccount) { series, progress ->
             // Save while the old detail still identifies the playing episode.
@@ -251,6 +303,7 @@ class MainActivity : Activity() {
     private var catalogBody: LinearLayout? = null
     private var homePosition: HomeScreen.Position? = null
     private var catalogPageKey = ""
+    private var openHongguoBrowse = false
     private val scrollPositions = mutableMapOf<String, Int>()
     private val catalogCards = linkedMapOf<String, View>()
     private val cardImages = linkedMapOf<String, Pair<ImageView, String>>()
@@ -411,7 +464,7 @@ class MainActivity : Activity() {
     private var startupApplied = false
     private var settingsAccountStatus: TextView? = null
     private var settingsGroup = 0
-    private val settingsPositions = IntArray(5)
+    private val settingsPositions = IntArray(7)
     private var settingsSidebar = emptyList<View>()
     private var settingsRows = emptyList<View>()
     private var page = 1
@@ -636,6 +689,9 @@ class MainActivity : Activity() {
         tvTools = TvTools(this)
         root = FrameLayout(this).apply { background = TvVisual.backdrop(this@MainActivity) }
         setContentView(root)
+        playbackStrategyPack.status()
+        checkPlaybackStrategyPack(force = false) {}
+        main.postDelayed(strategyPackCheckRunnable, PlaybackStrategyPackManager.CHECK_INTERVAL_MS)
         CodecCapabilities.init(this)
         CodecCapabilities.logDeviceCapabilities()
         cloudAccount =
@@ -652,7 +708,7 @@ class MainActivity : Activity() {
             homeFeed?.refreshAccountLabel()
             relatedSection?.refreshLabels()
             detail?.series?.let {
-                accountFavoriteButton?.text = detailFavoriteLabel(it.id)
+                accountFavoriteButton?.text = detailFavoriteLabel(it)
             }
             if (
                 screen == "detail" &&
@@ -923,6 +979,7 @@ class MainActivity : Activity() {
         tabState[tab] = CatalogState(page, catalog, hasMore, ranking)
         tabFocus[tab] = catalogFocus
         if (next == 6) { settingsGroup = 0; settingsPositions[0] = 0 }
+        if (next != 1) openHongguoBrowse = false
         tab = next
         val saved = tabState[next]
         page = saved?.page ?: 1
@@ -1012,9 +1069,9 @@ class MainActivity : Activity() {
     // 合并片单的卡片、预览与续播统一使用较新的观看进度。
     private fun collectionEpisodeTotal(series: Series): Int {
         val remote = isFavorites() || isHistory() || tab == 5
-        val cloud = if (tab == 5) cloudAccount.progress(series.id) else if (remote) mergedCloudProgress(series.id) else null
-        val local = if (tab != 5) library.progress(series.id) else null
-        val update = if (tab != 5) library.favoriteUpdate(series.id) else null
+        val cloud = if (series.source != "hongguo") null else if (tab == 5) cloudAccount.progress(series.id) else if (remote) mergedCloudProgress(series.id) else null
+        val local = if (tab != 5) library.progress(series) else null
+        val update = if (tab != 5) library.favoriteUpdate(series) else null
         return maxOf(
                 EpisodeSummary.total(series.badge),
                 EpisodeSummary.total(cloud?.series?.badge.orEmpty()),
@@ -1032,16 +1089,16 @@ class MainActivity : Activity() {
 
     private fun collectionEpisodeLabel(series: Series): String {
         val remote = isFavorites() || isHistory() || tab == 5
-        val cloud = if (tab == 5) cloudAccount.progress(series.id) else if (remote) mergedCloudProgress(series.id) else null
-        val local = if (tab != 5) library.progress(series.id) else null
-        val update = if (tab != 5) library.favoriteUpdate(series.id) else null
+        val cloud = if (series.source != "hongguo") null else if (tab == 5) cloudAccount.progress(series.id) else if (remote) mergedCloudProgress(series.id) else null
+        val local = if (tab != 5) library.progress(series) else null
+        val update = if (tab != 5) library.favoriteUpdate(series) else null
         return EpisodeSummary.label(
             collectionEpisodeTotal(series),
             cloud?.episodeIndex ?: local?.episodeIndex,
             account = cloud != null,
             ready = cloudAccount.historyReady,
             loading = cloudAccount.historyLoading,
-            markedWatched = cloud == null && library.watched(series.id),
+            markedWatched = cloud == null && library.watched(series),
             pending = tab == 5 && !reservationOnline,
             added = update?.added ?: 0,
         )
@@ -1054,15 +1111,15 @@ class MainActivity : Activity() {
             "hot" -> collectionReturn?.items.orEmpty().filterNot { it.id in library.hidden() }
             "later" -> library.later()
             "updates" ->
-                library.favorites().filter { (library.favoriteUpdate(it.id)?.added ?: 0) > 0 }
+                library.favorites().filter { (library.favoriteUpdate(it)?.added ?: 0) > 0 }
             "resume" ->
-                library.history().filterNot { library.watched(it.series.id) }.map { it.series }
+                library.history().filterNot { library.watched(it.series) }.map { it.series }
             else ->
                 when {
-                isFavorites() -> (library.favorites() + cloudAccount.favoriteState().rows.map { it.series }).distinctBy { it.id }
+                isFavorites() -> (library.favorites() + cloudAccount.favoriteState().rows.map { it.series }).distinctBy { it.libraryKey }
                 isHistory() -> (library.history().map { it.series to it.updatedAt } +
                     cloudAccount.historyRows().map { it.series to it.updatedAt })
-                    .sortedByDescending { it.second }.distinctBy { it.first.id }.map { it.first }
+                    .sortedByDescending { it.second }.distinctBy { it.first.libraryKey }.map { it.first }
                     tab == 5 ->
                         cloudAccount.reservationState(reservationOnline).rows.map { it.series }
                     else -> library.history().map { it.series }
@@ -1129,14 +1186,14 @@ class MainActivity : Activity() {
                     listOf(nav[8]),
                     { openDetail(it, resume = true, fromHome = true) },
                     { series, anchor ->
-                        if (cloudAccount.signedIn) accountFavoriteAction(series, anchor)
+                        if (series.source == "hongguo" && cloudAccount.signedIn) accountFavoriteAction(series, anchor)
                         else {
                             library.toggle(series)
                             homeFeed?.refreshAccountLabel()
-                            Toast.makeText(this, if (library.favorite(series.id)) "已加入本机收藏" else "已取消本机收藏", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this, if (library.favorite(series)) "已加入本机收藏" else "已取消本机收藏", Toast.LENGTH_SHORT).show()
                         }
                     },
-                    { id -> if (cloudAccount.signedIn) cloudAccount.favoriteActionLabel(id)
+                    { id -> if (cloudAccount.signedIn && catalog.firstOrNull { it.id == id }?.source != "openhongguo") cloudAccount.favoriteActionLabel(id)
                         else if (library.favorite(id)) "已收藏 · 本机" else "加入本机收藏" },
                     PublicFeedBackend(
                         library.maxQuality,
@@ -1153,7 +1210,7 @@ class MainActivity : Activity() {
                     restoreProgress = library::progress,
                     saveProgress = { progress, count, force ->
                         library.save(progress)
-                        cloudAccount.upload(CloudProgress(progress.series, progress.episodeId,
+                        if (progress.series.source == "hongguo") cloudAccount.upload(CloudProgress(progress.series, progress.episodeId,
                             progress.episodeIndex, progress.position, progress.duration, progress.updatedAt),
                             count, force || progress.completed || !foreground)
                     },
@@ -1194,14 +1251,58 @@ class MainActivity : Activity() {
             return
         }
         if (tab == 1) {
-
+            val sourceTabs = row().apply { setPadding(0, 0, 0, dp(8)) }
+            addButton(sourceTabs, "红果发现", selected = !openHongguoBrowse) {
+                if (openHongguoBrowse) {
+                    openHongguoBrowse = false
+                    page = 1
+                    catalog = emptyList()
+                    hasMore = false
+                    showCatalog(load = true, focusNav = true)
+                }
+            }
+            addButton(sourceTabs, "OpenHongguo 推荐目录", selected = openHongguoBrowse) {
+                if (!openHongguoBrowse) {
+                    openHongguoBrowse = true
+                    page = 1
+                    catalog = emptyList()
+                    hasMore = false
+                    showCatalog(load = true, focusNav = true)
+                }
+            }
+            container.addView(sourceTabs)
+            if (openHongguoBrowse) {
+                val body = column()
+                container.addView(body, lp(-1, 0).apply { weight = 1f })
+                if (loadRemote) {
+                    message(body, "正在加载 OpenHongguo 推荐目录…")
+                    val requestedPage = page
+                    work(
+                        { openHongguoAdapter.discover(requestedPage) },
+                        { result ->
+                            catalog = result.items
+                            hasMore = result.hasMore
+                            ranking = null
+                            body.removeAllViews()
+                            catalogGrid(body, focusNav = focusNav)
+                        },
+                        { problem ->
+                            body.removeAllViews()
+                            error(body, problem) { showCatalog(load = true, focusNav = true) }
+                        },
+                    )
+                } else {
+                    catalogGrid(body, focusNav)
+                }
+                return
+            }
             val browser = DiscoveryScreen(
-            this, discoveryBrowser, nav[tab], ::loadCover,
-            { openDetail(it, false) }, ::quickActions,
-            { selection, cursor, done ->
-                work({ repository.filteredDiscovery(selection, cursor) },
-                    { done(it, null) }, { done(null, it) })
-            },
+                this, discoveryBrowser, nav[tab], ::loadCover,
+                { openDetail(it, false) }, ::quickActions,
+                { selection, cursor, done ->
+                    work({ repository.filteredDiscovery(selection, cursor) },
+                        { done(it, null) }, { done(null, it) })
+                },
             )
             discoveryScreen = browser
             browser.setSideEntry(nav[1])
@@ -1375,7 +1476,7 @@ class MainActivity : Activity() {
                         when (requestTab) {
                             0 -> repository.home(requestPage, requestType)
                             2 -> repository.comicRanking(requestPage)
-                            else -> repository.searchAll(requestQuery, requestPage)
+                            else -> searchAllWithCommunity(requestQuery, requestPage)
                         }
                     result
                 },
@@ -1566,7 +1667,7 @@ class MainActivity : Activity() {
                 focusStyle(card)
                 card.contentDescription = item.title
                 card.tag = item.id
-                catalogCards[item.id] = card
+                catalogCards[item.libraryKey] = card
                 val position = if (tab == 2) ranking?.positions?.get(item.id) else null
                 val artwork = FrameLayout(this)
                 card.addView(
@@ -1607,7 +1708,7 @@ class MainActivity : Activity() {
                     },
                     lp(-1, -2).apply { weight = 1f },
                 )
-                val cloud = if (isHistory()) mergedCloudProgress(item.id) else null
+                val cloud = if (item.source == "hongguo" && isHistory()) mergedCloudProgress(item.id) else null
                 val progress =
                     cloud?.let {
                         WatchProgress(
@@ -1620,7 +1721,7 @@ class MainActivity : Activity() {
                             it.updatedAt,
                         )
                     }
-                        ?: if (isHistory() || collection == "resume") library.progress(item.id)
+                        ?: if (isHistory() || collection == "resume") library.progress(item)
                         else null
                 val summary =
                     when {
@@ -1643,28 +1744,28 @@ class MainActivity : Activity() {
                             setPadding(dp(3), 0, 0, 0)
                         }
                 card.addView(badge, lp(-1, -2))
-                if (isFavorites()) favoriteBadges[item.id] = badge
+                if (isFavorites()) favoriteBadges[item.libraryKey] = badge
                 card.setOnClickListener {
                     if (reservationNotice(item, card)) return@setOnClickListener
-                    catalogFocus = item.id
+                    catalogFocus = item.libraryKey
                     openDetail(
                         item,
                         isHistory() ||
                             collection == "resume" ||
                             collection == "updates",
                         cloudProgress =
-                            if (isHistory()) mergedCloudProgress(item.id) else null,
+                            if (item.source == "hongguo" && isHistory()) mergedCloudProgress(item.id) else null,
                     )
                 }
                 card.setOnLongClickListener {
-                    catalogFocus = item.id
+                    catalogFocus = item.libraryKey
                     quickActions(item, card)
                     true
                 }
                 card.setOnKeyListener { _, key, event ->
                     if (key == KeyEvent.KEYCODE_MENU) {
                         if (event.action == KeyEvent.ACTION_UP) {
-                            catalogFocus = item.id
+                            catalogFocus = item.libraryKey
                             quickActions(item, card)
                         }
                         true
@@ -1673,7 +1774,7 @@ class MainActivity : Activity() {
                 card.setOnFocusChangeListener { _, focused ->
                     card.background = TvStyle.card(this, focused)
                     if (focused) {
-                        catalogFocus = item.id
+                        catalogFocus = item.libraryKey
                         loadCover(image, item.cover)
                         preview.show(collectionPreviewSeries(item), selectionStatus(item))
                         if (!restoringScroll)
@@ -1873,13 +1974,13 @@ class MainActivity : Activity() {
                         card
                     }
                 },
-                { item -> catalogFocus = item.id },
+                { item -> catalogFocus = item.libraryKey },
                 { item ->
-                    catalogFocus = item.id
+                    catalogFocus = item.libraryKey
                     openDetail(item, false)
                 },
                 { item, anchor ->
-                    catalogFocus = item.id
+                    catalogFocus = item.libraryKey
                     quickActions(item, anchor)
                 },
                 {
@@ -1889,7 +1990,7 @@ class MainActivity : Activity() {
                         browser.append(emptyList(), false)
                     } else
                         work(
-                            { repository.searchAll(requestQuery, nextPage) },
+                            { searchAllWithCommunity(requestQuery, nextPage) },
                             { result ->
                                 if (continuousCatalog === browser) {
                                     val seen = catalog.mapTo(HashSet()) { it.id }
@@ -2008,15 +2109,15 @@ class MainActivity : Activity() {
                 .firstOrNull { it.series.id == series.id }
                 ?.let(::reservationDescription)
                 .orEmpty()
-        if (isHistory() && mergedCloudProgress(series.id) != null)
+        if (series.source == "hongguo" && isHistory() && mergedCloudProgress(series.id) != null)
             return mergedCloudProgress(series.id)
                 ?.let { "账号进度 · 第 ${it.episodeIndex+1} 集 · ${formatTime(it.position)}" }
                 .orEmpty()
-        val progress = library.progress(series.id)
+        val progress = library.progress(series)
         return listOf(
-                if (library.favorite(series.id)) "已在本机收藏" else "",
-                if (library.queued(series.id)) "稍后看" else "",
-                if (library.watched(series.id)) "整剧已看完"
+                if (library.favorite(series)) "已在本机收藏" else "",
+                if (library.queued(series)) "稍后看" else "",
+                if (library.watched(series)) "整剧已看完"
                 else
                     progress
                         ?.let { "上次第 ${it.episodeIndex+1} 集 · ${formatTime(it.position)}" }
@@ -2100,8 +2201,8 @@ class MainActivity : Activity() {
     }
 
     private fun homeShelves(): List<HomeScreen.Shelf> {
-        val recent = library.history().filterNot { library.watched(it.series.id) }
-        val updates = library.favorites().filter { (library.favoriteUpdate(it.id)?.added ?: 0) > 0 }
+        val recent = library.history().filterNot { library.watched(it.series) }
+        val updates = library.favorites().filter { (library.favoriteUpdate(it)?.added ?: 0) > 0 }
         val later = library.later()
         val hidden = library.hidden()
         val hot = catalog.filterNot { it.id in hidden }
@@ -2171,7 +2272,7 @@ class MainActivity : Activity() {
             catalogFocus =
                 remaining
                     .getOrNull(index.coerceAtMost((remaining.size - 1).coerceAtLeast(0)))
-                    ?.id
+                    ?.libraryKey
                     .orEmpty()
             val y = catalogScroll?.scrollY ?: 0
             scrollPositions[catalogPageKey] = y
@@ -2196,8 +2297,8 @@ class MainActivity : Activity() {
         val actions = mutableListOf<Pair<String, () -> Unit>>()
         actions +=
             (if (
-                library.progress(series.id) != null ||
-                    isHistory() && cloudAccount.progress(series.id) != null
+                library.progress(series) != null ||
+                    series.source == "hongguo" && isHistory() && cloudAccount.progress(series.id) != null
             )
                 "继续观看"
             else "直接播放") to
@@ -2206,26 +2307,31 @@ class MainActivity : Activity() {
                         series,
                         true,
                         cloudProgress =
-                            if (isHistory()) mergedCloudProgress(series.id) else null,
+                            if (series.source == "hongguo" && isHistory()) mergedCloudProgress(series.id) else null,
                     )
                 }
         actions += "查看剧集详情" to { openDetail(series) }
         actions +=
-            cloudAccount.favoriteActionLabel(series.id) to { accountFavoriteAction(series, anchor) }
+            (if (series.source == "hongguo" && cloudAccount.signedIn) cloudAccount.favoriteActionLabel(series.id) else if (library.favorite(series)) "取消本机收藏" else "加入本机收藏") to {
+                if (series.source == "hongguo" && cloudAccount.signedIn) accountFavoriteAction(series, anchor) else {
+                    val added = library.toggle(series)
+                    Toast.makeText(this, if (added) "已加入本机收藏" else "已取消本机收藏", Toast.LENGTH_SHORT).show()
+                }
+            }
         actions +=
-            (if (library.favorite(series.id)) "取消本机收藏" else "加入本机收藏") to
+            (if (library.favorite(series)) "取消本机收藏" else "加入本机收藏") to
                 {
                     val added = library.toggle(series)
                     Toast.makeText(this, if (added) "已加入本机收藏" else "已取消本机收藏", Toast.LENGTH_SHORT)
                         .show()
                     refreshLibraryCards(
-                        series.id,
+                        series.libraryKey,
                         !added && (isFavorites() || collection == "updates"),
                     )
-                    if (added) favoriteMonitor.check()
+                    if (added && series.source == "hongguo") favoriteMonitor.check()
                 }
         actions += "查看完整标题" to { tvTools.info("完整标题", series.title, anchor) }
-        if (isHistory() && library.progress(series.id) != null) actions += "管理本机观看记录" to { manageHistory(series, anchor) }
+        if (isHistory() && library.progress(series) != null) actions += "管理本机观看记录" to { manageHistory(series, anchor) }
         tvTools.choose(
             series.title,
             actions.map { it.first },
@@ -2235,9 +2341,9 @@ class MainActivity : Activity() {
         )
     }
 
-    private fun detailFavoriteLabel(id: String): String =
-        if (cloudAccount.signedIn) cloudAccount.favoriteActionLabel(id)
-        else if (library.favorite(id)) "取消本机收藏" else "加入本机收藏"
+    private fun detailFavoriteLabel(series: Series): String =
+        if (series.source == "hongguo" && cloudAccount.signedIn) cloudAccount.favoriteActionLabel(series.id)
+        else if (library.favorite(series)) "取消本机收藏" else "加入本机收藏"
 
     private fun accountFavoriteAction(series: Series, anchor: View?) {
         if (!cloudAccount.signedIn) {
@@ -2312,7 +2418,7 @@ class MainActivity : Activity() {
         }
         scroll.addView(content, android.widget.FrameLayout.LayoutParams(-1, -2))
         layout.addView(scroll, lp(0, -1).apply { weight = 1f })
-        val categories = listOf("检查更新", "播放", "外观与操作", "账户", "关于应用")
+        val categories = listOf("检查更新", "播放", "外观与操作", "账户", "关于应用", "播放来源", "下载管理")
         val entries = mutableListOf<View>()
         fun setting(label: String, action: () -> Unit): TextView {
             val view = SettingsValueView(this).apply {
@@ -2464,14 +2570,139 @@ class MainActivity : Activity() {
                     setting("登录与账户管理") { cloudAccount.show() }
                     setting("手机控制台 · 搜索 / 遥控 / 账户片单") { phoneConsole.show(null) }
                 }
+                5 -> {
+                    content.addView(text("播放来源按上方优先级依次尝试。只有标示可用的来源会参与播放；失败后自动继续下一个来源。", 14f, muted).apply {
+                        setPadding(0, 0, 0, dp(12))
+                    })
+                    val sourceRows = mutableListOf<View>()
+                    fun refreshSources(restoreFocusTag: String? = null) {
+                        val order = playbackSourceSettings.order()
+                        val enabled = playbackSourceSettings.enabled()
+                        sourceRows.forEach { content.removeView(it) }
+                        sourceRows.clear()
+                        order.forEachIndexed { position, id ->
+                            val source = playbackSourceSettings.sources.first { it.id == id }
+                            val row = row().apply {
+                                focusStyle(this)
+                                setPadding(dp(14), dp(10), dp(12), dp(10))
+                                background = TvVisual.row(this@MainActivity, false)
+                                minimumHeight = dp(62)
+                                setOnFocusChangeListener { _, focused -> background = TvVisual.row(this@MainActivity, focused) }
+                            }
+                            val indexLabel = text("${position + 1}.", 16f, muted)
+                            row.addView(indexLabel, lp(dp(36), -2))
+                            val copy = column()
+                            copy.addView(text(source.title, 15f))
+                            copy.addView(text(source.description, 12f, if (source.available) muted else Color.rgb(208, 151, 84)))
+                            row.addView(copy, lp(0, -2).apply { weight = 1f })
+                            val state = if (!source.available) "Android 不可用" else if (id in enabled) "已啟用" else "已停用"
+                            row.addView(text(state, 12f, if (source.available && id in enabled) accent else muted))
+                            fun sourceAction(label: String, active: Boolean, tag: String, action: () -> Unit) {
+                                val control = Button(this).apply {
+                                    text = label
+                                    isAllCaps = false
+                                    isFocusable = true
+                                    isEnabled = active
+                                    textSize = 14f
+                                    minWidth = dp(46)
+                                    minHeight = dp(42)
+                                    setPadding(dp(8), 0, dp(8), 0)
+                                    focusStyle(this)
+                                    this.tag = tag
+                                    setOnClickListener { action() }
+                                }
+                                row.addView(control, lp(-2, -2).apply { leftMargin = dp(4) })
+                            }
+                            sourceAction("↑", position > 0, "source-up-$id") {
+                                playbackSourceSettings.move(id, -1)
+                                refreshSources("source-up-$id")
+                            }
+                            sourceAction("↓", position < order.lastIndex, "source-down-$id") {
+                                playbackSourceSettings.move(id, 1)
+                                refreshSources("source-down-$id")
+                            }
+                            sourceAction(if (id in enabled) "停用" else "啟用", source.available, "source-toggle-$id") {
+                                playbackSourceSettings.setEnabled(id, id !in enabled)
+                                refreshSources("source-toggle-$id")
+                            }
+                            row.setOnClickListener {
+                                tvTools.info(source.title, source.description, row)
+                            }
+                            content.addView(row, lp(-1, -2).apply { bottomMargin = dp(6) })
+                            sourceRows += row
+                        }
+                        restoreFocusTag?.let { tag ->
+                            content.post { content.findViewWithTag<View>(tag)?.requestFocus() }
+                        }
+                    }
+                    setting("恢復預設來源順序") {
+                        playbackSourceSettings.reset()
+                        refreshSources()
+                    }
+                    refreshSources()
+
+                    val strategyStatus = text(strategyStatusText(playbackStrategyPack.status()), 13f, muted).apply {
+                        setPadding(0, dp(12), 0, dp(8))
+                    }
+                    content.addView(strategyStatus)
+                    setting(if (playbackStrategyPack.status().enabled) "停用自動簽名策略更新" else "啟用自動簽名策略更新") {
+                        val changed = playbackStrategyPack.setEnabled(!playbackStrategyPack.status().enabled)
+                        strategyStatus.text = strategyStatusText(changed)
+                    }
+                    setting("立即檢查簽名策略更新") {
+                        if (!strategyCheckRunning) {
+                            strategyStatus.text = "正在檢查簽名策略……"
+                            checkPlaybackStrategyPack(force = true) { next ->
+                                strategyStatus.text = strategyStatusText(next)
+                            }
+                        } else {
+                            strategyStatus.text = strategyStatusText(playbackStrategyPack.status()) + "\\n正在檢查中"
+                        }
+                    }
+                    setting("回滾上一版簽名策略") {
+                        val rolledBack = playbackStrategyPack.rollback()
+                        strategyStatus.text = strategyStatusText(rolledBack)
+                    }
+                    setting("恢復內置簽名策略") {
+                        val reset = playbackStrategyPack.resetToEmbedded()
+                        strategyStatus.text = strategyStatusText(reset)
+                    }
+                }
+                6 -> {
+                    content.addView(text("下载文件保存在应用私有目录。可在剧集详情加入单集或整剧队列；下载期间保持应用运行。", 14f, muted).apply {
+                        setPadding(0, 0, 0, dp(12))
+                    })
+                    setting("打开下载管理") { showDownloadManager() }
+                    setting("查看下载目录位置") {
+                        tvTools.info("下载目录", java.io.File(filesDir, "downloads").absolutePath, content)
+                    }
+                }
                 4 -> {
                     lateinit var about: TextView
                     about = setting("关于hongguoTV") {
-                        tvTools.info("关于hongguoTV", "hongguoTV · 非官方客户端\n基于 N3urda/hongguoTV\n功能同步：tsukiyo-zero/hongguoTV\n版本：${BuildConfig.VERSION_NAME}\n项目：https://github.com/N3urda/hongguoTV\n\n本应用与红果官方无隶属关系。", about)
+                        tvTools.info("关于hongguoTV", "hongguoTV · 非官方客户端\n基于 N3urda/hongguoTV\n功能同步：tsukiyo-zero/hongguoTV\n版本：${BuildConfig.VERSION_NAME}\n整合项目：https://github.com/kanonso/hongguoTV\n\n本应用与红果官方无隶属关系。", about)
                     }
                     lateinit var license: TextView
-                    license = setting("开源许可") {
-                        tvTools.info("开源许可", "本原生版以 GPL-3.0 发布。\n内容协议与加密处理移植自 drpys（22261ad）。\nAndroidX Media3 / OkHttp：Apache-2.0\nKotlin：Apache-2.0\nBouncy Castle：MIT\n完整源码和许可证见 GitHub：N3urda/hongguoTV。", license)
+                    license = setting("开源许可与第三方声明") {
+                        val names = listOf(
+                            "OPENHONGGUO-APACHE-2.0.txt",
+                            "EDDSA-CC0-1.0.txt",
+                            "JACKOTOM-GPL-3.0.txt",
+                        )
+                        val fullText = buildString {
+                            append("本原生应用以 GPL-3.0-only 发布。完整许可证与第三方许可文本随 APK assets/licenses 分发。\n")
+                            append("openhongguo Android SDK 0.4.1：Apache-2.0\n")
+                            append("EdDSA-Java BloxBean patch 0.3.1：CC0 1.0\n")
+                            append("jackotom/hongguo-drama：GPL-3.0\n\n")
+                            names.forEach { name ->
+                                append("\n========== $name ==========\n")
+                                runCatching {
+                                    assets.open("licenses/$name").bufferedReader().use { append(it.readText()) }
+                                }.onFailure { append("无法读取许可证文件：${it.message}") }
+                                append("\n")
+                            }
+                        }
+                        tvTools.info("开源许可与第三方声明", fullText, license)
                     }
                 }
             }
@@ -2499,6 +2730,485 @@ class MainActivity : Activity() {
         render(settingsGroup)
         parent.addView(text("↑↓ 选择  ·  → 进入选项  ·  ← 返回分类  ·  返回：分类 / 顶部导航", 12f, Color.rgb(112, 122, 140)).apply { setPadding(0, dp(12), 0, 0) })
         settingsRows.getOrNull(settingsPositions[settingsGroup].coerceAtMost(settingsRows.lastIndex))?.requestFocus()
+    }
+
+    private fun playDownloadedTask(task: TvDownloadTask) {
+        val completed = downloadManager.snapshot()
+            .filter { downloadGroupKey(it) == downloadGroupKey(task) && it.status == TvDownloadStatus.COMPLETED }
+            .sortedBy { it.episodeNumber }
+        val factory = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(
+            androidx.media3.datasource.DefaultDataSource.Factory(this),
+        )
+        val playable = mutableListOf<Pair<TvDownloadTask, androidx.media3.exoplayer.source.MediaSource>>()
+        completed.forEach { candidate ->
+            val source = runCatching {
+                if (candidate.mediaFormat == "hls") {
+                    TvDownloadRuntime.createHlsMediaSource(applicationContext, candidate.id, candidate.mediaUri)
+                } else {
+                    val file = java.io.File(candidate.filePath)
+                    check(file.isFile && file.canRead()) { "下载文件不存在" }
+                    val item = MediaItem.Builder()
+                        .setMediaId("download-${candidate.id}")
+                        .setUri(android.net.Uri.fromFile(file))
+                        .setMediaMetadata(
+                            MediaMetadata.Builder()
+                                .setTitle("${candidate.seriesTitle} · 第 ${candidate.episodeNumber} 集")
+                                .build(),
+                        )
+                        .build()
+                    factory.createMediaSource(item)
+                }
+            }.onFailure {
+                android.util.Log.w("HongguoTV", "Skip unavailable downloaded episode ${candidate.episodeNumber}", it)
+            }.getOrNull()
+            if (source != null) playable += candidate to source
+        }
+        val startIndex = playable.indexOfFirst { it.first.id == task.id }
+        if (startIndex < 0) {
+            tvTools.info("本机播放", "下载文件不存在或离线媒体无法读取。", root)
+            return
+        }
+        val mediaSources = playable.map { it.second }
+        playDownloadedMediaSource("${task.seriesTitle} · 已下载 ${playable.size} 集") { player ->
+            // ExoPlayer's playlist advances to the next available downloaded episode automatically.
+            player.setMediaSources(mediaSources, startIndex, 0L)
+        }
+    }
+
+    private fun playDownloadedFile(path: String, title: String) {
+        val file = java.io.File(path)
+        if (!file.isFile || !file.canRead()) {
+            tvTools.info("本机视频", "下载文件不存在或无法读取。", root)
+            return
+        }
+        playDownloadedMediaSource(title) { player ->
+            player.setMediaItem(androidx.media3.common.MediaItem.fromUri(android.net.Uri.fromFile(file)))
+        }
+    }
+
+    private fun playDownloadedMediaSource(title: String, setSource: (androidx.media3.exoplayer.ExoPlayer) -> Unit) {
+        sleepTimer.cancel()
+        homePlayback = true
+        phonePlayback = false
+        directPlayback = false
+        releasePlayer()
+        screen = "player"
+        playbackReady = false
+        pausedForLifecycle = false
+        waitingForFirstFrame = false
+        playError = false
+        root.removeAllViews()
+        root.setBackgroundColor(Color.BLACK)
+        val view = PlayerView(this).apply {
+            useController = true
+            controllerAutoShow = true
+            controllerShowTimeoutMs = 5000
+            resizeMode = frameResizeMode()
+            setKeepContentOnPlayerReset(true)
+            setShutterBackgroundColor(Color.BLACK)
+        }
+        playerView = view
+        root.addView(view, FrameLayout.LayoutParams(-1, -1))
+        val instance = ensurePlayer()
+        view.player = instance
+        setSource(instance)
+        instance.prepare()
+        instance.playWhenReady = true
+        playbackReady = true
+        Toast.makeText(this, "本机播放：$title", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showDownloadRangeDialog(data: Detail, anchor: View? = null) {
+        val total = data.episodes.size
+        if (total <= 0) {
+            tvTools.info("下载选集", "这部剧暂时没有可下载的集数。", anchor)
+            return
+        }
+        val start = (episodeIndex + 1).coerceIn(1, total)
+        val fromPicker = NumberPicker(this).apply {
+            minValue = 1
+            maxValue = total
+            value = start
+            wrapSelectorWheel = false
+            descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+        }
+        val toPicker = NumberPicker(this).apply {
+            minValue = 1
+            maxValue = total
+            value = start
+            wrapSelectorWheel = false
+            descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+        }
+        fromPicker.setOnValueChangedListener { _, _, value ->
+            if (toPicker.value < value) toPicker.value = value
+        }
+        toPicker.setOnValueChangedListener { _, _, value ->
+            if (fromPicker.value > value) fromPicker.value = value
+        }
+        val fromColumn = column().apply {
+            addView(text("从第几集开始", 13f, muted))
+            addView(fromPicker, lp(dp(112), dp(112)))
+        }
+        val toColumn = column().apply {
+            addView(text("到第几集结束", 13f, muted))
+            addView(toPicker, lp(dp(112), dp(112)))
+        }
+        val content = row().apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(12), dp(16), dp(8))
+            addView(fromColumn, lp(0, -2).apply { weight = 1f })
+            addView(toColumn, lp(0, -2).apply { weight = 1f })
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("选择下载集数 · 共 $total 集")
+            .setView(content)
+            .setPositiveButton("下载所选范围", null)
+            .setNeutralButton("全部下载 $total 集") { _, _ ->
+                downloadManager.enqueueAll(
+                    data.series.id, data.series.title, data.episodes,
+                    source = data.episodeSource, episodeCount = total,
+                    maxQuality = library.maxQuality, startNumber = 1,
+                )
+                showDownloadManager(anchor)
+            }
+            .setNegativeButton("取消", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val first = fromPicker.value
+                val last = toPicker.value
+                if (first > last) {
+                    Toast.makeText(this, "结束集数不能早于开始集数", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                downloadManager.enqueueAll(
+                    data.series.id, data.series.title, data.episodes.subList(first - 1, last),
+                    source = data.episodeSource, episodeCount = total,
+                    maxQuality = library.maxQuality, startNumber = first,
+                )
+                dialog.dismiss()
+                showDownloadManager(anchor)
+            }
+            fromPicker.requestFocus()
+        }
+        dialog.show()
+    }
+
+    private fun mergeDownloadedSeries(seriesTasks: List<TvDownloadTask>) {
+        if (activeSeasonMerge != null) {
+            Toast.makeText(this, "已有合并任务正在进行", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val completed = seriesTasks.filter { it.status == TvDownloadStatus.COMPLETED }
+            .sortedBy { it.episodeNumber }
+        val mergeable = completed.filter {
+            it.mediaFormat != "hls" && java.io.File(it.filePath).let { file -> file.isFile && file.canRead() }
+        }
+        if (mergeable.size < 2) {
+            tvTools.info(
+                "合并本季",
+                "至少需要 2 集已完成的 MP4 单文件下载。HLS 离线缓存目前不能直接合并。",
+                root,
+            )
+            return
+        }
+        val outputDirectory = java.io.File(filesDir, "downloads/merged").apply { mkdirs() }
+        val safeTitle = seriesTasks.firstOrNull()?.seriesTitle.orEmpty()
+            .replace(Regex("[^\\p{L}\\p{N}._ -]"), "_").trim().take(48).ifBlank { "短剧" }
+        val output = java.io.File(outputDirectory, "${safeTitle}_合并_${System.currentTimeMillis()}.mp4")
+        val editedItems = mergeable.map { task ->
+            val file = java.io.File(task.filePath)
+            EditedMediaItem.Builder(MediaItem.fromUri(android.net.Uri.fromFile(file))).build()
+        }
+        val sequence = EditedMediaItemSequence.Builder(editedItems).build()
+        val composition = Composition.Builder(listOf(sequence)).build()
+        var progressDialog: AlertDialog? = null
+        lateinit var transformer: Transformer
+        val listener = object : Transformer.Listener {
+            override fun onCompleted(composition: Composition, result: ExportResult) {
+                if (activeSeasonMerge !== transformer) return
+                activeSeasonMerge = null
+                activeSeasonMergePoll?.let(main::removeCallbacks)
+                activeSeasonMergePoll = null
+                progressDialog?.takeIf { it.isShowing }?.dismiss()
+                Toast.makeText(this@MainActivity, "合并完成：${mergeable.size} 集", Toast.LENGTH_LONG).show()
+                runCatching {
+                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                        this@MainActivity, "${packageName}.updates", output,
+                    )
+                    val viewIntent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                        setDataAndType(uri, "video/mp4")
+                        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        clipData = android.content.ClipData.newUri(contentResolver, output.name, uri)
+                    }
+                    startActivity(android.content.Intent.createChooser(viewIntent, "选择外部播放器"))
+                }.onFailure {
+                    tvTools.info("合并完成", "文件已保存：${output.absolutePath}\n无法自动打开外部播放器，请从文件管理器选择此 MP4。", root)
+                }
+            }
+
+            override fun onError(composition: Composition, result: ExportResult, exception: ExportException) {
+                if (activeSeasonMerge !== transformer) return
+                activeSeasonMerge = null
+                activeSeasonMergePoll?.let(main::removeCallbacks)
+                activeSeasonMergePoll = null
+                progressDialog?.takeIf { it.isShowing }?.dismiss()
+                output.delete()
+                tvTools.info(
+                    "合并失败",
+                    "装置可能不支持其中某集的解码或编码格式。原始下载文件不会被删除。\n${exception.message.orEmpty().take(180)}",
+                    root,
+                )
+            }
+        }
+        try {
+            transformer = Transformer.Builder(this).addListener(listener)
+                .setVideoMimeType(MimeTypes.VIDEO_H264)
+                .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                .build()
+            activeSeasonMerge = transformer
+            val omittedHls = completed.count { it.mediaFormat == "hls" }
+            val dialog = AlertDialog.Builder(this)
+                .setTitle("合并本季影片")
+                .setMessage(
+                    "正在合并已完成的 ${mergeable.size} 集，输出为 H.264/AAC MP4。" +
+                        if (omittedHls > 0) "\n另有 $omittedHls 集是 HLS 离线缓存，本次不会加入。" else "",
+                )
+                .setNegativeButton("取消合并", null)
+                .setCancelable(false)
+                .create()
+            progressDialog = dialog
+            dialog.setOnShowListener {
+                dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
+                    if (activeSeasonMerge === transformer) {
+                        activeSeasonMerge = null
+                        activeSeasonMergePoll?.let(main::removeCallbacks)
+                        activeSeasonMergePoll = null
+                        transformer.cancel()
+                        transformer.removeAllListeners()
+                        output.delete()
+                        dialog.dismiss()
+                    }
+                }
+            }
+            dialog.show()
+            transformer.start(composition, output.absolutePath)
+            val progressHolder = ProgressHolder()
+            val poll = object : Runnable {
+                override fun run() {
+                    if (activeSeasonMerge !== transformer || !dialog.isShowing) return
+                    val state = transformer.getProgress(progressHolder)
+                    if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
+                        dialog.setMessage(
+                            "合并中 ${progressHolder.progress}% · ${mergeable.size} 集\n" +
+                                "請保持應用在前景，低階裝置可能需要較長時間。",
+                        )
+                    }
+                    if (state != Transformer.PROGRESS_STATE_NOT_STARTED) main.postDelayed(this, 500)
+                }
+            }
+            activeSeasonMergePoll = poll
+            main.post(poll)
+        } catch (failure: Exception) {
+            activeSeasonMerge?.takeIf { it === runCatching { transformer }.getOrNull() }?.let {
+                runCatching { it.cancel(); it.removeAllListeners() }
+            }
+            activeSeasonMerge = null
+            activeSeasonMergePoll?.let(main::removeCallbacks)
+            activeSeasonMergePoll = null
+            output.delete()
+            progressDialog?.takeIf { it.isShowing }?.dismiss()
+            tvTools.info("无法开始合并", failure.message.orEmpty().take(180), root)
+        }
+    }
+
+    private fun showDownloadManager(anchor: View? = null) {
+        val list = column()
+        val controls = row().apply { gravity = Gravity.CENTER_VERTICAL }
+        val bodyContent = column()
+        bodyContent.addView(controls)
+        bodyContent.addView(list)
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            isVerticalScrollBarEnabled = false
+            addView(bodyContent, android.widget.FrameLayout.LayoutParams(-1, -2))
+        }
+        lateinit var dialog: AlertDialog
+        fun render(items: List<TvDownloadTask>) {
+            val restoreFocusTag = (currentFocus?.tag as? String)?.takeIf { it.startsWith("download-action:") }
+            var firstAction: View? = null
+            controls.removeAllViews()
+            controls.addView(text("同时下载上限", 13f, muted), lp(-2, -2).apply { rightMargin = dp(10) })
+            val limitButton = Button(this).apply {
+                text = "${downloadManager.maxConcurrentDownloads()} 集"
+                isFocusable = true
+                isAllCaps = false
+                textSize = 13f
+                minHeight = dp(42)
+                tag = "download-action:concurrency"
+                focusStyle(this)
+                setOnClickListener {
+                    val next = if (downloadManager.maxConcurrentDownloads() >= 3) 1
+                        else downloadManager.maxConcurrentDownloads() + 1
+                    downloadManager.setMaxConcurrentDownloads(next)
+                    render(downloadManager.snapshot())
+                }
+            }
+            controls.addView(limitButton)
+            if (firstAction == null) firstAction = limitButton
+            list.removeAllViews()
+            if (items.isEmpty()) {
+                list.addView(text("下载队列为空。请先在剧集详情选择集数下载。", 15f, muted).apply {
+                    setPadding(dp(18), dp(24), dp(18), dp(24))
+                })
+                return
+            }
+            items.groupBy(::downloadGroupKey).values.forEach { groupItems ->
+                val ordered = groupItems.sortedBy { it.episodeNumber }
+                val sample = ordered.first()
+                val complete = ordered.count { it.status == TvDownloadStatus.COMPLETED }
+                val downloading = ordered.count { it.status == TvDownloadStatus.DOWNLOADING }
+                val waiting = ordered.count { it.status == TvDownloadStatus.PENDING }
+                val header = row().apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(12), dp(10), dp(8), dp(10))
+                    background = TvVisual.panel(this@MainActivity)
+                }
+                header.addView(text(
+                    "${if (sample.source == "openhongguo") "OpenHongguo" else "红果"} · ${sample.seriesTitle} · 共 ${ordered.size} 集 · 完成 $complete · 下载中 $downloading · 等待 $waiting",
+                    14f,
+                ).apply { setTypeface(null, Typeface.BOLD) }, lp(0, -2).apply { weight = 1f })
+                val mergeableCount = ordered.count {
+                    it.status == TvDownloadStatus.COMPLETED && it.mediaFormat != "hls" &&
+                        java.io.File(it.filePath).isFile
+                }
+                if (mergeableCount >= 2) {
+                    val mergeButton = Button(this).apply {
+                        text = "合并 $mergeableCount 集"
+                        isFocusable = true
+                        isAllCaps = false
+                        textSize = 12f
+                        minHeight = dp(40)
+                        tag = "download-action:merge:${sample.seriesId}"
+                        focusStyle(this)
+                        setOnClickListener { mergeDownloadedSeries(ordered) }
+                    }
+                    if (firstAction == null) firstAction = mergeButton
+                    header.addView(mergeButton, lp(-2, -2).apply { leftMargin = dp(8) })
+                }
+                list.addView(header, lp(-1, -2).apply { bottomMargin = dp(6) })
+                ordered.forEach { task ->
+                    val card = column().apply {
+                        setPadding(dp(14), dp(12), dp(14), dp(12))
+                        background = TvVisual.panel(this@MainActivity)
+                    }
+                    val status = when (task.status) {
+                        TvDownloadStatus.PENDING -> "等待中"
+                        TvDownloadStatus.DOWNLOADING -> "下载中"
+                        TvDownloadStatus.PAUSED -> "已暂停"
+                        TvDownloadStatus.INTERRUPTED -> "已中断，需要手动继续"
+                        TvDownloadStatus.COMPLETED -> "已完成"
+                        TvDownloadStatus.FAILED -> "失败"
+                        TvDownloadStatus.CANCELLED -> "已取消"
+                    }
+                    card.addView(text("${task.seriesTitle} · 第 ${task.episodeNumber} 集", 15f).apply {
+                        setTypeface(null, Typeface.BOLD)
+                    })
+                    val progressText = if (task.total > 0)
+                        "$status · ${task.progress}% · ${formatDownloadBytes(task.bytes)} / ${formatDownloadBytes(task.total)}"
+                    else status
+                    card.addView(text(progressText, 12f, muted).apply { setPadding(0, dp(5), 0, dp(4)) })
+                    if (task.error.isNotBlank()) card.addView(text(task.error, 12f, Color.rgb(208, 151, 84)))
+                    val actions = row()
+                    fun action(label: String, tag: String, callback: () -> Unit) {
+                        val control = Button(this).apply {
+                            text = label
+                            isFocusable = true
+                            isAllCaps = false
+                            textSize = 12f
+                            minHeight = dp(42)
+                            setPadding(dp(10), 0, dp(10), 0)
+                            this.tag = tag
+                            focusStyle(this)
+                            setOnClickListener { callback() }
+                        }
+                        if (firstAction == null) firstAction = control
+                        actions.addView(control, lp(-2, -2).apply { rightMargin = dp(6) })
+                    }
+                    when (task.status) {
+                        TvDownloadStatus.PENDING, TvDownloadStatus.DOWNLOADING -> {
+                            action("暂停", "download-action:${task.id}:pause") { downloadManager.pause(task.id) }
+                            action("取消", "download-action:${task.id}:cancel") { downloadManager.cancel(task.id) }
+                        }
+                        TvDownloadStatus.INTERRUPTED, TvDownloadStatus.PAUSED, TvDownloadStatus.FAILED -> {
+                            action("继续／重试", "download-action:${task.id}:resume") { downloadManager.resume(task.id) }
+                            action("取消", "download-action:${task.id}:cancel") { downloadManager.cancel(task.id) }
+                        }
+                        TvDownloadStatus.COMPLETED -> {
+                            action("本机连续播放", "download-action:${task.id}:play") { playDownloadedTask(task) }
+                            action("删除文件", "download-action:${task.id}:delete") { downloadManager.remove(task.id, deleteFile = true) }
+                        }
+                        TvDownloadStatus.CANCELLED -> action("移除记录", "download-action:${task.id}:remove") { downloadManager.remove(task.id) }
+                    }
+                    card.addView(actions)
+                    list.addView(card, lp(-1, -2).apply { bottomMargin = dp(8) })
+                }
+            }
+            if (restoreFocusTag != null) {
+                scroll.post {
+                    val restored = scroll.findViewWithTag<View>(restoreFocusTag)
+                    if (restored != null) restored.requestFocus() else firstAction?.requestFocus()
+                }
+            } else if (firstAction != null) {
+                firstAction?.requestFocus()
+            }
+        }
+        dialog = AlertDialog.Builder(this)
+            .setTitle("下载管理")
+            .setView(scroll)
+            .setNegativeButton("关闭", null)
+            .create()
+        val stopObserving = downloadManager.observe { items ->
+            main.post { if (::root.isInitialized && dialog.isShowing) render(items) }
+        }
+        dialog.setOnDismissListener { stopObserving() }
+        dialog.show()
+    }
+
+    private fun formatDownloadBytes(value: Long): String {
+        if (value < 1024) return "$value B"
+        val mb = value / 1024.0 / 1024.0
+        return if (mb < 1024) String.format(java.util.Locale.ROOT, "%.1f MB", mb)
+        else String.format(java.util.Locale.ROOT, "%.2f GB", mb / 1024.0)
+    }
+
+    /**
+     * Query the existing App + website search and the independent openhongguo anonymous SDK.
+     * If either provider fails, preserve the other provider's results and pagination.
+     */
+    private fun searchAllWithCommunity(query: String, requestedPage: Int): CatalogPage {
+        val primary = try {
+            Result.success(repository.search(query, requestedPage, ContentType.SHORT))
+        } catch (expired: SearchSessionExpiredException) {
+            throw expired
+        } catch (failure: Exception) {
+            if (failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
+            Result.failure(failure)
+        }
+        val community =
+            if (openHongguoAdapter.isRuntimeAvailable) {
+                runCatching { openHongguoAdapter.search(query, requestedPage) }
+            } else {
+                Result.success(CatalogPage(emptyList(), false))
+            }
+        if (primary.isFailure && community.isFailure) {
+            throw java.io.IOException("红果搜索来源暂时都不可用，请稍后重试", primary.exceptionOrNull())
+        }
+        return CatalogSearchMerge.merge(
+            primary.getOrElse { CatalogPage(emptyList(), false) },
+            community.getOrElse { CatalogPage(emptyList(), false) },
+            query,
+        )
     }
 
     private fun saveSearchDraft() {
@@ -2559,19 +3269,19 @@ class MainActivity : Activity() {
     private fun manageHistory(series: Series, anchor: View?) {
         tvTools.choose(
             series.title,
-            listOf("继续观看", if (library.watched(series.id)) "恢复未看状态" else "标记整剧已看", "删除这条记录"),
+            listOf("继续观看", if (library.watched(series)) "恢复未看状态" else "标记整剧已看", "删除这条记录"),
             anchor,
             { index ->
                 when (index) {
                     0 -> openDetail(series, true)
                     1 -> {
-                        library.setWatched(series.id, !library.watched(series.id))
-                        catalogFocus = series.id
+                        library.setWatched(series, !library.watched(series))
+                        catalogFocus = series.libraryKey
                         showCatalog()
                     }
                     2 ->
                         tvTools.confirm("删除本机观看记录", "删除《${series.title}》的本机观看进度？收藏会保留。", anchor) {
-                            library.removeHistory(series.id)
+                            library.removeHistory(series)
                             showCatalog()
                         }
                 }
@@ -2599,7 +3309,7 @@ class MainActivity : Activity() {
         val accountScope = cloudAccount.historyScope
         detailCloudScope = accountScope
         detailCloudProgress =
-            cloudProgress ?: if (!resume || fromHome) cloudAccount.progress(series.id) else null
+            if (series.source == "hongguo") cloudProgress ?: if (!resume || fromHome) cloudAccount.progress(series.id) else null else null
         pendingDetail = series
         detailAutoplay = autoplay
         invalidatePage()
@@ -2613,11 +3323,27 @@ class MainActivity : Activity() {
         val body = base(series.title)
         message(body, "正在加载剧集…")
         work(
-            { repository.detail(series.id) },
+            {
+                if (series.source == "openhongguo") {
+                    val rows = openHongguoAdapter.listPlayableEpisodes(series.id)
+                    Detail(series, rows.map { it.second }, episodeSource = "openhongguo")
+                } else {
+                    try {
+                        repository.detail(series.id)
+                    } catch (primaryFailure: Exception) {
+                        if (series.source != "hongguo" || primaryFailure is InterruptedException || Thread.currentThread().isInterrupted)
+                            throw primaryFailure
+                        val expectedCount = OpenHongguoDirectoryPolicy.expectedCountFromBadge(series.badge)
+                            ?: throw primaryFailure
+                        val fallbackEpisodes = openHongguoAdapter.listCompleteEpisodeDirectoryBySeriesTitle(series.title, expectedCount)
+                        Detail(series, fallbackEpisodes.map { it.second }, episodeSource = "openhongguo")
+                    }
+                }
+            },
             { result ->
                 detail = result
                 library.observeFavorite(
-                    series.id,
+                    series,
                     result.episodes.size,
                     System.currentTimeMillis(),
                     acknowledge = true,
@@ -2629,7 +3355,7 @@ class MainActivity : Activity() {
                     showCatalog()
                     return@work
                 }
-                val progress = detailProgress(result, preferCloud = cloudProgress != null)
+                val progress = detailProgress(result, preferCloud = cloudProgress != null && result.episodeSource == result.series.source)
                 val target =
                     ResumePlayback.target(
                         result.episodes,
@@ -2668,11 +3394,12 @@ class MainActivity : Activity() {
     private fun detailProgress(data: Detail, preferCloud: Boolean = false): WatchProgress? =
         ResumePlayback.progress(
             data,
-            library.progress(data.series.id),
+            library.progress(data.series),
             detailCloudProgress?.takeIf {
-                cloudAccount.signedIn && detailCloudScope == cloudAccount.historyScope
+                data.episodeSource == data.series.source &&
+                    cloudAccount.signedIn && detailCloudScope == cloudAccount.historyScope
             },
-            preferCloud,
+            preferCloud && data.episodeSource == data.series.source,
         )
 
     private fun showDetail(focusEpisode: Boolean) {
@@ -2748,7 +3475,7 @@ class MainActivity : Activity() {
         val progress = detailProgress(data)
         val resumeIndex =
             progress?.let { data.episodes.indexOf(it.episodeId).takeIf { n -> n >= 0 } } ?: 0
-        val watched = library.watched(data.series.id)
+        val watched = library.watched(data.series)
         val continueTarget =
             ResumePlayback.target(
                 data.episodes,
@@ -2778,21 +3505,22 @@ class MainActivity : Activity() {
             addButton(actions, "评论 · 第 ${episodeIndex+1} 集") { social.showComments(detailComments) }
         val secondary = row().apply { setPadding(0, dp(8), 0, 0) }
         info.addView(secondary)
+        addButton(secondary, "下载选集") { showDownloadRangeDialog(data, play) }
         accountFavoriteButton =
-            addButton(secondary, detailFavoriteLabel(data.series.id)) {
-                if (cloudAccount.signedIn) {
+            addButton(secondary, detailFavoriteLabel(data.series)) {
+                if (data.series.source == "hongguo" && cloudAccount.signedIn) {
                     accountFavoriteAction(data.series, accountFavoriteButton)
                 } else {
                     favoriteMonitor.stop()
                     val saved = library.toggle(data.series)
                     if (saved)
                         library.observeFavorite(
-                            data.series.id,
+                            data.series,
                             data.episodes.size,
                             System.currentTimeMillis(),
                             acknowledge = true,
                         )
-                    accountFavoriteButton?.text = detailFavoriteLabel(data.series.id)
+                    accountFavoriteButton?.text = detailFavoriteLabel(data.series)
                 }
             }
         lateinit var synopsisButton: TextView
@@ -2805,6 +3533,12 @@ class MainActivity : Activity() {
                 scroll.post { scroll.scrollTo(0, previousScroll) }
             }
         content.addView(hero)
+        if (data.episodeSource != data.series.source) {
+            content.addView(text(
+                "分集目录备援来源：OpenHongguo · 已核对剧名、季别与总集数；观看记录仍保留在原红果剧集",
+                12f, muted,
+            ).apply { setPadding(0, dp(8), 0, dp(2)); maxLines = 2 })
+        }
         content.addView(text("选集分组 · 共 ${data.episodes.size} 集", 12f, muted).apply {
             setPadding(0, dp(12), 0, dp(6))
         })
@@ -2962,7 +3696,7 @@ class MainActivity : Activity() {
         val reuse =
             screen == "player" && player != null && playerView != null && (!playError || recovering) && !recreateView
                 && ((playerView?.videoSurfaceView is TextureView) == VideoRotation.usesTexture(library.videoRotation))
-        library.setWatched(data.series.id, false)
+        library.setWatched(data.series, false)
         val selectedIndex = index.coerceIn(0, data.episodes.lastIndex)
         if (
             position == 0L &&
@@ -3200,6 +3934,14 @@ class MainActivity : Activity() {
                             CodecCapabilities::supports,
                             recentPlaybackSources,
                             metadataAhead = data.episodes.drop(selectedIndex + 1).take(2),
+                            sourceOrder = playbackSourceSettings.order(),
+                            enabledSources = if (data.episodeSource == "openhongguo")
+                                setOf("openhongguo")
+                            else playbackSourceSettings.enabled(),
+                            openHongguoLadder = {
+                                if (data.episodeSource == "openhongguo") openHongguoAdapter.resolvePlayback(requestedId)
+                                else openHongguoAdapter.resolvePlaybackBySeriesTitle(data.series.title, selectedIndex + 1, data.episodes.size)
+                            },
                         ) {
                             it == null || CodecCapabilities.supports(it)
                         }
@@ -3423,6 +4165,8 @@ class MainActivity : Activity() {
     private fun maybePrefetch() {
         val p = player ?: return
         val data = detail ?: return
+        // Community provider episode IDs are not App IDs; skip speculative App prefetch.
+        if (data.episodeSource == "openhongguo") return
         if (
             !foreground ||
                 !p.isPlaying ||
@@ -3484,6 +4228,8 @@ class MainActivity : Activity() {
                                     initialBytes = 32 * 1024,
                                     metadataAhead = metadataAhead,
                                     speculative = true,
+                                    sourceOrder = playbackSourceSettings.order(),
+                                    enabledSources = playbackSourceSettings.enabled(),
                                 ) {
                                     it == null || CodecCapabilities.supports(it)
                                 } ?: throw java.io.IOException("没有电视可播放的清晰度")
@@ -3581,7 +4327,7 @@ class MainActivity : Activity() {
                 System.currentTimeMillis(),
             )
         library.save(old)
-        cloudAccount.upload(
+        if (EpisodeSourcePolicy.canSyncHongguoCloudProgress(old.series, data.episodeSource)) cloudAccount.upload(
             CloudProgress(
                 old.series,
                 old.episodeId,
@@ -4849,10 +5595,10 @@ class MainActivity : Activity() {
                     }
                 },
                 lastWatched =
-                    library.progress(data.series.id)?.let {
+                    library.progress(data.series)?.let {
                         data.episodes.indexOf(it.episodeId).takeIf { n -> n >= 0 }
                     },
-                lastCompleted = library.progress(data.series.id)?.completed == true,
+                lastCompleted = library.progress(data.series)?.completed == true,
             )
         episodePanel = next
         next.show(controls, anchor)
@@ -4889,7 +5635,7 @@ class MainActivity : Activity() {
                 System.currentTimeMillis(),
             )
         library.save(progress)
-        cloudAccount.upload(
+        if (EpisodeSourcePolicy.canSyncHongguoCloudProgress(progress.series, data.episodeSource)) cloudAccount.upload(
             CloudProgress(
                 progress.series,
                 progress.episodeId,
@@ -4924,11 +5670,13 @@ class MainActivity : Activity() {
     }
 
     private fun offerNextSeason(current: Detail) {
+        // Community episode IDs belong to openhongguo; never send them to Hongguo's related API.
+        if (current.series.source != "hongguo") return
         if (!library.seasonAutoplay || !library.autoNext || seasonSuppressed || seasonPending || !foreground) return
         seasonPending = true
         val token = ++seasonGeneration
         work({ RelatedWorks.nextSeason(current.series, repository.related(current.series.id)) }, { next ->
-            if (token != seasonGeneration || !foreground || detail?.series?.id != current.series.id) return@work
+            if (token != seasonGeneration || !foreground || detail?.series?.libraryKey != current.series.libraryKey) return@work
             nextSeasonWork = next
             if (next != null) {
                 val banner = text("本季结束后播放《${next.series.title}》 · 取消请按菜单键，或确认打开菜单", 13f).apply {
@@ -4948,8 +5696,9 @@ class MainActivity : Activity() {
 
     private fun finishSeason(current: Detail) {
         val next = nextSeasonWork ?: return
-        if (!foreground || seasonSuppressed || !library.seasonAutoplay || !library.autoNext ||
-            sleepStopped || pausedForLifecycle || detail?.series?.id != current.series.id) return
+        if (current.series.source != "hongguo" || next.series.source != current.series.source ||
+            !foreground || seasonSuppressed || !library.seasonAutoplay || !library.autoNext ||
+            sleepStopped || pausedForLifecycle || detail?.series?.libraryKey != current.series.libraryKey) return
         val token = seasonGeneration
         playbackText.text = "正在加载下一季…"
         work({ repository.detail(next.series.id) }, { result ->

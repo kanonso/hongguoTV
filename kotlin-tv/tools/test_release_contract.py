@@ -88,7 +88,8 @@ class ReleaseContractTest(unittest.TestCase):
             target.mkdir(parents=True, exist_ok=True)
             with zipfile.ZipFile(target / r.apk_filename(suffix), 'w') as package:
                 for abi in abis:
-                    package.writestr(f'lib/{abi}/libffmpegJNI.so', b'native')
+                    library = 'libffmpegJNI.so' if suffix == 'android5' else 'libgojni.so'
+                    package.writestr(f'lib/{abi}/{library}', b'native')
             listing = target / 'output-metadata.json'
             elements = json.loads(listing.read_text())['elements'] if listing.exists() else []
             elements.append(dict(outputFile=r.apk_filename(suffix), versionCode=10, versionName='0.10.0', filters=r.apk_filters(suffix)))
@@ -105,8 +106,8 @@ class ReleaseContractTest(unittest.TestCase):
                 paths = r.prepare_apks('0.10.0', 10, 21, out)
             self.assertEqual(['hongguotv-kotlin-0.10.0-' + suffix + '.apk' for suffix in ['android5', 'android6', 'android6-arm32-v7a', 'android6-arm64-v8a']], [p.name for p in paths])
             self.assertEqual(8, run.call_count)
-            for path, (_, _, abis) in zip(paths, r.APK_VARIANTS):
-                r.validate_apk_abis(path, abis)
+            for path, (_, suffix, abis) in zip(paths, r.APK_VARIANTS):
+                r.validate_apk_abis(path, abis, require_ffmpeg=(suffix == 'android5'))
 
     def test_each_missing_apk_blocks_preparation(self):
         for variant, suffix, _ in r.APK_VARIANTS:
@@ -155,13 +156,21 @@ class ReleaseContractTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     r.validate_apk_abis(path, {'armeabi-v7a'})
 
-    def test_platform_package_rejects_any_native_library(self):
+    def test_platform_package_allows_sdk_jni_but_rejects_ffmpeg(self):
         with tempfile.TemporaryDirectory() as tmp:
             apk = Path(tmp) / 'platform.apk'
+            abis = {'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'}
             with zipfile.ZipFile(apk, 'w') as package:
-                package.writestr('lib/armeabi-v7a/libffmpegJNI.so', b'native')
-            with self.assertRaises(ValueError):
-                r.validate_apk_abis(apk, set())
+                for abi in abis:
+                    package.writestr(f'lib/{abi}/libgojni.so', b'sdk-native')
+            r.validate_apk_abis(apk, abis, require_ffmpeg=False)
+
+            with zipfile.ZipFile(apk, 'w') as package:
+                for abi in abis:
+                    package.writestr(f'lib/{abi}/libgojni.so', b'sdk-native')
+                package.writestr('lib/armeabi-v7a/libffmpegJNI.so', b'ffmpeg')
+            with self.assertRaisesRegex(ValueError, 'must not include the FFmpeg decoder'):
+                r.validate_apk_abis(apk, abis, require_ffmpeg=False)
 
     def test_invalid_split_signature_blocks_all_asset_copying(self):
         with tempfile.TemporaryDirectory() as tmp:
