@@ -104,7 +104,7 @@ data class CatalogPage(
     val trialHints: Map<String, TrialHint> = emptyMap(),
 )
 
-data class StreamInfo(val url: String, val key: ByteArray?, val quality: String, val backupUrl: String? = null)
+data class StreamInfo(val url: String, val key: ByteArray?, val quality: String, val backupUrl: String? = null, val source: String = "app")
 
 /** One playable rendition; width/height are the coded dimensions when the API reports them. */
 data class Rendition(
@@ -115,8 +115,9 @@ data class Rendition(
     val url: String,
     val key: ByteArray?,
     val backupUrl: String? = null,
+    val source: String = "app",
 ) {
-    fun toStreamInfo() = StreamInfo(url, key, if (quality > 0) "${quality}P" else "自动", backupUrl)
+    fun toStreamInfo() = StreamInfo(url, key, if (quality > 0) "${quality}P" else "自动", backupUrl, source)
 }
 
 /**
@@ -1035,6 +1036,65 @@ constructor(
                 }
             }
         }
+
+    /**
+     * Official public full-MP4 fallback. It only accepts the public endpoint's complete media URL;
+     * preview-only pages, non-HTTPS hosts, redirects, expired URLs and protected-playback denials
+     * are not bypassed. Returned media is unencrypted H.264 and can use the normal RemoteVideo path.
+     */
+    fun publicWebsiteMp4Fallback(vid: String): Rendition {
+        require(vid.matches(Regex("[0-9]{1,30}"))) { "分集编号无效" }
+        val endpoint = "$site/api/video/protected/fallback-play-info"
+        val body = JSONObject().put("item_id", vid)
+            .toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+        val request = Request.Builder()
+            .url(endpoint)
+            .post(body)
+            .header("User-Agent", "Mozilla/5.0")
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .header("Referer", "$site/")
+            .build()
+        val client = http.newBuilder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .callTimeout(8, TimeUnit.SECONDS)
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (response.code != 200) throw ContentHttpException(response.code)
+            val responseBody = response.body ?: throw IOException("官网公开兜底未返回内容")
+            if (responseBody.contentLength() > 64 * 1024) throw IOException("官网公开兜底响应过大")
+            val bytes = responseBody.bytes()
+            if (bytes.isEmpty() || bytes.size > 64 * 1024) throw IOException("官网公开兜底响应为空或过大")
+            val payload = try { JSONObject(String(bytes, Charsets.UTF_8)) }
+                catch (problem: Exception) { throw IOException("官网公开兜底响应格式异常", problem) }
+            val code = payload.optJSONObject("base_resp")?.optInt("StatusCode", payload.optInt("code", 0))
+                ?: payload.optInt("code", 0)
+            if (code != 0) throw IOException("官网公开片源暂不可用")
+            val rawUrl = cleanUrl(payload.str("main_url"))
+            val media = try { rawUrl.toHttpUrl() } catch (problem: Exception) {
+                throw IOException("官网公开片源地址无效", problem)
+            }
+            val allowedHosts = listOf("qznovelvod.com", "fqnovelvod.com", "douyinvod.com")
+            if (media.scheme != "https" || media.username.isNotEmpty() || media.password.isNotEmpty() ||
+                media.port != 443 || allowedHosts.none { media.host == it || media.host.endsWith(".$it") }) {
+                throw IOException("官网公开片源未通過安全校验")
+            }
+            val expiry = payload.optLong("url_expire", 0L)
+            if (expiry > 0 && expiry * 1000L <= clock() + 5_000L) {
+                throw IOException("官网公开片源地址已过期")
+            }
+            return Rendition(
+                quality = 360,
+                codec = "h264",
+                width = 360,
+                height = 640,
+                url = media.toString(),
+                key = null,
+                source = "web",
+            )
+        }
+    }
 
     /** Retained legacy transport for compatibility regression coverage. */
     internal fun legacyStreamLadderWithCompatibility(id: String, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): StreamLadder {
