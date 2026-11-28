@@ -396,7 +396,8 @@ internal class TvDownloadManager(
             val partial = if (current?.mediaFormat == "hls") hlsStore.downloadedBytes(id)
                 else File(current?.filePath.orEmpty() + ".part").takeIf(File::exists)?.length() ?: current?.bytes ?: 0L
             when (current?.status) {
-                TvDownloadStatus.PAUSED, TvDownloadStatus.CANCELLED, TvDownloadStatus.PENDING -> {
+                TvDownloadStatus.PAUSED, TvDownloadStatus.CANCELLED, TvDownloadStatus.PENDING,
+                TvDownloadStatus.INTERRUPTED -> {
                     update(id) { it.copy(bytes = partial) }
                 }
                 else -> update(id) {
