@@ -128,7 +128,7 @@ class SearchPayloadTest {
                 else -> error("Unexpected search endpoint: ${request.url.encodedPath}")
             }
             okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1)
-                .code(200).message("OK").body(response.trimIndent().toResponseBody()).build()
+                .code(200).message("OK").body(okhttp3.ResponseBody.create(null, response.trimIndent())).build()
         }.build()
         val page = ContentRepository(http).search("大佬，你该出手了第五季", type = ContentType.SHORT)
         assertEquals(listOf("700001", "700002"), page.items.map { it.id })
