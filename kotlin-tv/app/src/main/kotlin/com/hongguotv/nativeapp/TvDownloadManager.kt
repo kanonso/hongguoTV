@@ -22,6 +22,7 @@ internal data class TvDownloadTask(
     val seriesTitle: String,
     val episodeId: String,
     val episodeNumber: Int,
+    val episodeCount: Int = 0,
     val source: String,
     val status: TvDownloadStatus,
     val bytes: Long = 0,
@@ -40,7 +41,7 @@ internal data class TvDownloadTask(
  */
 internal class TvDownloadManager(
     context: Context,
-    private val open: (episodeId: String, seriesTitle: String, episodeNumber: Int, source: String) -> OpenedStream,
+    private val open: (episodeId: String, seriesTitle: String, episodeNumber: Int, episodeCount: Int, source: String) -> OpenedStream,
 ) {
     private val app = context.applicationContext
     private val directory = File(app.filesDir, "downloads").apply { mkdirs() }
@@ -75,15 +76,18 @@ internal class TvDownloadManager(
         return { listeners -= listener }
     }
 
-    fun enqueue(seriesId: String, seriesTitle: String, episodeId: String, episodeNumber: Int, source: String = ""): String {
+    fun enqueue(seriesId: String, seriesTitle: String, episodeId: String, episodeNumber: Int, source: String = "", episodeCount: Int = 0): String {
         require(seriesId.matches(Regex("[0-9]{1,30}")) && episodeId.matches(Regex("[0-9]{1,30}")))
         require(episodeNumber in 1..10000)
         val id = UUID.randomUUID().toString()
         val safeTitle = seriesTitle.replace(Regex("[^\\p{L}\\p{N}._ -]"), "_").trim().take(48).ifBlank { "短剧" }
         val target = File(directory, "${safeTitle}_第${episodeNumber}集_${id.take(8)}.mp4")
         synchronized(lock) {
-            tasks[id] = TvDownloadTask(id, seriesId, seriesTitle, episodeId, episodeNumber,
-                source = source, status = TvDownloadStatus.PENDING, filePath = target.absolutePath)
+            tasks[id] = TvDownloadTask(
+                id, seriesId, seriesTitle, episodeId, episodeNumber,
+                episodeCount = episodeCount, source = source, status = TvDownloadStatus.PENDING,
+                filePath = target.absolutePath,
+            )
             persistLocked()
         }
         publish()
@@ -91,8 +95,10 @@ internal class TvDownloadManager(
         return id
     }
 
-    fun enqueueAll(seriesId: String, seriesTitle: String, episodeIds: List<String>, source: String = "") {
-        episodeIds.take(500).forEachIndexed { index, episodeId -> enqueue(seriesId, seriesTitle, episodeId, index + 1, source) }
+    fun enqueueAll(seriesId: String, seriesTitle: String, episodeIds: List<String>, source: String = "", episodeCount: Int = episodeIds.size) {
+        episodeIds.take(500).forEachIndexed { index, episodeId ->
+            enqueue(seriesId, seriesTitle, episodeId, index + 1, source, episodeCount)
+        }
     }
 
     fun pause(id: String) {
@@ -177,7 +183,7 @@ internal class TvDownloadManager(
         var opened: OpenedStream? = null
         try {
             val task = synchronized(lock) { tasks[id] } ?: return
-            opened = open(task.episodeId, task.seriesTitle, task.episodeNumber, task.source)
+            opened = open(task.episodeId, task.seriesTitle, task.episodeNumber, task.episodeCount, task.source)
             val video = opened.video
             synchronized(lock) {
                 if (tasks[id]?.status != TvDownloadStatus.DOWNLOADING) throw IOException("下载已暂停或取消")
@@ -289,7 +295,7 @@ internal class TvDownloadManager(
     private fun encode(task: TvDownloadTask) = JSONObject().apply {
         put("id", task.id); put("seriesId", task.seriesId); put("seriesTitle", task.seriesTitle)
         put("episodeId", task.episodeId); put("episodeNumber", task.episodeNumber)
-        put("source", task.source); put("status", task.status.name); put("bytes", task.bytes); put("total", task.total)
+        put("episodeCount", task.episodeCount); put("source", task.source); put("status", task.status.name); put("bytes", task.bytes); put("total", task.total)
         put("filePath", task.filePath); put("error", task.error); put("fingerprint", task.fingerprint)
     }
 
@@ -298,6 +304,7 @@ internal class TvDownloadManager(
             id = row.getString("id"), seriesId = row.getString("seriesId"),
             seriesTitle = row.optString("seriesTitle"), episodeId = row.getString("episodeId"),
             episodeNumber = row.optInt("episodeNumber", 1),
+            episodeCount = row.optInt("episodeCount", 0),
             source = row.optString("source"),
             status = TvDownloadStatus.valueOf(row.optString("status", "PAUSED")),
             bytes = row.optLong("bytes"), total = row.optLong("total"),
