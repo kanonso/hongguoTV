@@ -270,7 +270,7 @@ object LibraryBackup {
             }
         }
         incoming.watched
-            .filter { id -> id !in records && local.favorites.none { it.id == id } }
+            .filter { id -> id !in records && local.favorites.none { it.libraryKey == id } }
             .forEach { watched.add(it) }
         val history = records.values.sortedByDescending { it.updatedAt }.take(200)
         val retained = (favorites.map { it.libraryKey } + history.map { it.series.libraryKey }).toSet()
