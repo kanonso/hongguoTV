@@ -1101,9 +1101,9 @@ class MainActivity : Activity() {
 
     private fun collectionEpisodeLabel(series: Series): String {
         val remote = isFavorites() || isHistory() || tab == 5
-        val cloud = if (tab == 5) cloudAccount.progress(series.id) else if (remote) mergedCloudProgress(series.id) else null
+        val cloud = if (series.source != "hongguo") null else if (tab == 5) cloudAccount.progress(series.id) else if (remote) mergedCloudProgress(series.id) else null
         val local = if (tab != 5) library.progress(series) else null
-        val update = if (tab != 5) library.favoriteUpdate(series.id) else null
+        val update = if (tab != 5) library.favoriteUpdate(series) else null
         return EpisodeSummary.label(
             collectionEpisodeTotal(series),
             cloud?.episodeIndex ?: local?.episodeIndex,
@@ -1202,7 +1202,7 @@ class MainActivity : Activity() {
                         else {
                             library.toggle(series)
                             homeFeed?.refreshAccountLabel()
-                            Toast.makeText(this, if (library.favorite(series.id)) "已加入本机收藏" else "已取消本机收藏", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this, if (library.favorite(series)) "已加入本机收藏" else "已取消本机收藏", Toast.LENGTH_SHORT).show()
                         }
                     },
                     { id -> if (cloudAccount.signedIn && catalog.firstOrNull { it.id == id }?.source != "openhongguo") cloudAccount.favoriteActionLabel(id)
@@ -1689,7 +1689,7 @@ class MainActivity : Activity() {
                             it.updatedAt,
                         )
                     }
-                        ?: if (isHistory() || collection == "resume") library.progress(item.id)
+                        ?: if (isHistory() || collection == "resume") library.progress(item)
                         else null
                 val summary =
                     when {
@@ -2169,8 +2169,8 @@ class MainActivity : Activity() {
     }
 
     private fun homeShelves(): List<HomeScreen.Shelf> {
-        val recent = library.history().filterNot { library.watched(it.series.id) }
-        val updates = library.favorites().filter { (library.favoriteUpdate(it.id)?.added ?: 0) > 0 }
+        val recent = library.history().filterNot { library.watched(it.series) }
+        val updates = library.favorites().filter { (library.favoriteUpdate(it)?.added ?: 0) > 0 }
         val later = library.later()
         val hidden = library.hidden()
         val hot = catalog.filterNot { it.id in hidden }
