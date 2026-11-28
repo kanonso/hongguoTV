@@ -3666,6 +3666,8 @@ class MainActivity : Activity() {
     private fun maybePrefetch() {
         val p = player ?: return
         val data = detail ?: return
+        // Community provider episode IDs are not App IDs; skip speculative App prefetch.
+        if (data.series.source == "openhongguo") return
         if (
             !foreground ||
                 !p.isPlaying ||
