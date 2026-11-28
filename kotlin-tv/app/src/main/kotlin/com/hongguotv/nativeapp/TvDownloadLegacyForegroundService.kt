@@ -27,6 +27,7 @@ internal class TvDownloadLegacyForegroundService : Service() {
         val downloads = TvDownloadRuntime.get(applicationContext)
         manager = downloads
         stopObserving?.invoke()
+        downloads.resumePending()
         stopObserving = downloads.observe { tasks ->
             val active = tasks.any { it.status == TvDownloadStatus.PENDING || it.status == TvDownloadStatus.DOWNLOADING }
             val notification = TvDownloadNotification.build(this, tasks)
@@ -34,7 +35,6 @@ internal class TvDownloadLegacyForegroundService : Service() {
             notificationManager.notify(TvDownloadNotification.NOTIFICATION_ID, notification)
             if (!active) stopSelf(startId)
         }
-        downloads.resumePending()
         return START_STICKY
     }
 

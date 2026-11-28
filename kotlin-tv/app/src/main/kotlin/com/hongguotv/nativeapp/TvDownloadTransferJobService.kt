@@ -26,6 +26,7 @@ internal class TvDownloadTransferJobService : JobService() {
         TvDownloadNotification.createChannel(this)
         val downloads = TvDownloadRuntime.get(applicationContext)
         manager = downloads
+        downloads.resumePending()
         setNotification(params, TvDownloadNotification.NOTIFICATION_ID,
             TvDownloadNotification.build(this, downloads.snapshot()), JOB_END_NOTIFICATION_POLICY_REMOVE)
         stopObserving = downloads.observe { tasks ->
@@ -43,7 +44,6 @@ internal class TvDownloadTransferJobService : JobService() {
                 }
             }
         }
-        downloads.resumePending()
         return true
     }
 
