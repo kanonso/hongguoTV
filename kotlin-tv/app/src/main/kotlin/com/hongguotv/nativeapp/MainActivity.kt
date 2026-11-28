@@ -2584,6 +2584,132 @@ class MainActivity : Activity() {
         settingsRows.getOrNull(settingsPositions[settingsGroup].coerceAtMost(settingsRows.lastIndex))?.requestFocus()
     }
 
+    private fun playDownloadedFile(path: String, title: String) {
+        val file = java.io.File(path)
+        if (!file.isFile || !file.canRead()) {
+            tvTools.info("本机视频", "下载文件不存在或无法读取。")
+            return
+        }
+        sleepTimer.cancel()
+        homePlayback = true
+        phonePlayback = false
+        directPlayback = false
+        releasePlayer()
+        screen = "player"
+        playbackReady = false
+        pausedForLifecycle = false
+        waitingForFirstFrame = false
+        playError = false
+        root.removeAllViews()
+        root.setBackgroundColor(Color.BLACK)
+        val view = PlayerView(this).apply {
+            useController = true
+            controllerAutoShow = true
+            controllerShowTimeoutMs = 5000
+            resizeMode = frameResizeMode()
+            setKeepContentOnPlayerReset(true)
+            setShutterBackgroundColor(Color.BLACK)
+        }
+        playerView = view
+        root.addView(view, FrameLayout.LayoutParams(-1, -1))
+        val instance = ensurePlayer()
+        view.player = instance
+        instance.setMediaItem(androidx.media3.common.MediaItem.fromUri(android.net.Uri.fromFile(file)))
+        instance.prepare()
+        instance.playWhenReady = true
+        playbackReady = true
+        Toast.makeText(this, "本机播放：$title", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showDownloadManager(anchor: View? = null) {
+        val list = column()
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            isVerticalScrollBarEnabled = false
+            addView(list, android.widget.FrameLayout.LayoutParams(-1, -2))
+        }
+        lateinit var dialog: AlertDialog
+        fun render(items: List<TvDownloadTask>) {
+            list.removeAllViews()
+            if (items.isEmpty()) {
+                list.addView(text("下载队列为空。请先在剧集详情选择单集下载或批量下载。", 15f, muted).apply {
+                    setPadding(dp(18), dp(24), dp(18), dp(24))
+                })
+                return
+            }
+            items.forEach { task ->
+                val card = column().apply {
+                    setPadding(dp(14), dp(12), dp(14), dp(12))
+                    background = TvVisual.panel(this@MainActivity)
+                }
+                val status = when (task.status) {
+                    TvDownloadStatus.PENDING -> "等待中"
+                    TvDownloadStatus.DOWNLOADING -> "下载中"
+                    TvDownloadStatus.PAUSED -> "已暂停"
+                    TvDownloadStatus.COMPLETED -> "已完成"
+                    TvDownloadStatus.FAILED -> "失败"
+                    TvDownloadStatus.CANCELLED -> "已取消"
+                }
+                card.addView(text("${task.seriesTitle} · 第 ${task.episodeNumber} 集", 15f).apply {
+                    setTypeface(null, Typeface.BOLD)
+                })
+                val progressText = if (task.total > 0)
+                    "$status · ${task.progress}% · ${formatDownloadBytes(task.bytes)} / ${formatDownloadBytes(task.total)}"
+                else status
+                card.addView(text(progressText, 12f, muted).apply { setPadding(0, dp(5), 0, dp(4)) })
+                if (task.error.isNotBlank()) card.addView(text(task.error, 12f, Color.rgb(208, 151, 84)))
+                val actions = row()
+                fun action(label: String, callback: () -> Unit) {
+                    val control = Button(this).apply {
+                        text = label
+                        isFocusable = true
+                        isAllCaps = false
+                        textSize = 12f
+                        minHeight = dp(42)
+                        setPadding(dp(10), 0, dp(10), 0)
+                        focusStyle(this)
+                        setOnClickListener(callback)
+                    }
+                    actions.addView(control, lp(-2, -2).apply { rightMargin = dp(6) })
+                }
+                when (task.status) {
+                    TvDownloadStatus.PENDING, TvDownloadStatus.DOWNLOADING -> {
+                        action("暂停") { downloadManager.pause(task.id) }
+                        action("取消") { downloadManager.cancel(task.id) }
+                    }
+                    TvDownloadStatus.PAUSED, TvDownloadStatus.FAILED -> {
+                        action("继续／重试") { downloadManager.resume(task.id) }
+                        action("取消") { downloadManager.cancel(task.id) }
+                    }
+                    TvDownloadStatus.COMPLETED -> {
+                        action("本机播放") { playDownloadedFile(task.filePath, task.seriesTitle) }
+                        action("删除文件") { downloadManager.remove(task.id, deleteFile = true) }
+                    }
+                    TvDownloadStatus.CANCELLED -> action("移除记录") { downloadManager.remove(task.id) }
+                }
+                card.addView(actions)
+                list.addView(card, lp(-1, -2).apply { bottomMargin = dp(8) })
+            }
+        }
+        dialog = AlertDialog.Builder(this)
+            .setTitle("下载管理")
+            .setView(scroll)
+            .setNegativeButton("关闭", null)
+            .create()
+        val stopObserving = downloadManager.observe { items ->
+            main.post { if (::root.isInitialized && dialog.isShowing) render(items) }
+        }
+        dialog.setOnDismissListener { stopObserving() }
+        dialog.show()
+    }
+
+    private fun formatDownloadBytes(value: Long): String {
+        if (value < 1024) return "$value B"
+        val mb = value / 1024.0 / 1024.0
+        return if (mb < 1024) String.format(java.util.Locale.ROOT, "%.1f MB", mb)
+        else String.format(java.util.Locale.ROOT, "%.2f GB", mb / 1024.0)
+    }
+
     /**
      * Query the existing App + website search and the independent openhongguo anonymous SDK.
      * If either provider fails, preserve the other provider's results and pagination.
