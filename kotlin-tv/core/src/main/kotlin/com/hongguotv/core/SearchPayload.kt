@@ -43,17 +43,38 @@ internal object SearchPayload {
                     else -> emptyList()
                 }
                 for (video in videos) {
-                    val id = video.str("series_id").ifEmpty { row.str("book_id").ifEmpty { row.str("search_result_id") } }
-                    // A multi-season cell has one row heading but several distinct video titles.
-                    val title = cleanTitle(video.str("series_name").ifEmpty { video.str("series_title") }
-                        .ifEmpty { video.str("title") }.ifEmpty {
-                            row.optJSONObject("search_high_light")?.optJSONObject("title")?.str("text").orEmpty()
-                        }.ifEmpty { row.str("cell_name") })
+                    // Search responses may mix cards, recommendations and non-video book types.
+                    // Only map the playable short-drama / animated-drama records into the TV catalog.
+                    val contentType = video.optString("content_type", row.optString("content_type", "1004"))
+                    if (contentType.isNotBlank() && contentType !in setOf("1003", "1004")) continue
+                    val album = video.optJSONObject("album_info")
+                    val id = if (contentType == "1003") {
+                        album?.str("album_id_str").orEmpty().ifEmpty { album?.str("album_id").orEmpty() }
+                    } else {
+                        video.str("series_id").ifEmpty { row.str("book_id").ifEmpty { row.str("search_result_id") } }
+                    }
+                    // Multi-season cells contain one heading and several videos. Prefer each video's
+                    // own title; the highlighted heading is only a final fallback.
+                    val highlighted = row.optJSONObject("search_high_light")?.optJSONObject("title")?.str("text").orEmpty()
+                    val title = cleanTitle(
+                        if (contentType == "1003") album?.str("title").orEmpty() else video.str("series_name")
+                            .ifEmpty { video.str("series_title") }.ifEmpty { video.str("title") }
+                    ).ifEmpty { cleanTitle(highlighted).ifEmpty { cleanTitle(row.str("cell_name")) } }
                     if (!id.matches(Regex("[0-9]{1,30}")) || title.isBlank()) continue
-                    val count = video.optInt("episode_cnt")
-                    items += Series(id, title, cleanUrl(video.str("cover").ifEmpty { video.str("cover_url") }.ifEmpty { video.str("series_cover") }),
-                        video.str("video_desc").ifEmpty { video.str("series_intro") },
-                        if (count > 0) "全 $count 集" else video.str("rec_text"), video.str("sub_title"))
+                    val count = if (contentType == "1003") album?.optInt("episode_cnt") ?: 0 else video.optInt("episode_cnt")
+                    if (contentType == "1003" && count <= 0) continue
+                    items += Series(
+                        id,
+                        title,
+                        cleanUrl(album?.str("cover").orEmpty().ifEmpty {
+                            video.str("cover").ifEmpty { video.str("cover_url").ifEmpty { video.str("series_cover") } }
+                        }),
+                        cleanTitle(album?.str("intro").orEmpty().ifEmpty {
+                            video.str("video_desc").ifEmpty { video.str("series_intro") }
+                        }),
+                        if (count > 0) "全 $count 集" else video.str("rec_text"),
+                        video.str("sub_title"),
+                    )
                 }
             }
         }
@@ -66,6 +87,15 @@ internal object SearchPayload {
         return Page(prioritize(items.distinctBy { it.id }, keyword), more,
             tab.str("search_id"), tab.str("passback"), tab.str("next_offset").toIntOrNull()?.takeIf { it >= 0 })
     }
+
+    fun hasExactMatch(items: List<Series>, keyword: String): Boolean {
+        val query = normalized(keyword)
+        return query.isNotEmpty() && items.any { normalized(it.title) == query }
+    }
+
+    /** Merge independent App and website pages without losing seasons or source pagination. */
+    fun merge(primary: List<Series>, supplemental: List<Series>, keyword: String): List<Series> =
+        prioritize((primary + supplemental).distinctBy { it.id }, keyword)
 
     fun prioritize(items: List<Series>, keyword: String): List<Series> {
         val query = normalized(keyword)
