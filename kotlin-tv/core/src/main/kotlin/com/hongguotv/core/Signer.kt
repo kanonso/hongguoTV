@@ -289,8 +289,14 @@ internal class Signer(
         return encoded.map { it.toByte() }.toByteArray()
     }
 
-    fun medusa(url: String, body: ByteArray?, ts: Int, identity: Map<String, String>? = null): String {
-        if (mobileV5) return medusaV5(url, body, ts, identity ?: device)
+    fun medusa(
+        url: String,
+        body: ByteArray?,
+        ts: Int,
+        identity: Map<String, String>? = null,
+        field21: Int? = null,
+    ): String {
+        if (mobileV5) return medusaV5(url, body, ts, identity ?: device, field21)
         val who = identity ?: device
         val bodyMd5 = body?.let { digest("MD5", it) } ?: ByteArray(16)
         val query = url.substringAfter('?').toByteArray()
@@ -374,7 +380,13 @@ internal class Signer(
         return (prefix + byteArrayOf(r.toByte(), (r shr 8).toByte(), 0, 1) + encrypted).base64()
     }
 
-    private fun medusaV5(url: String, body: ByteArray?, ts: Int, who: Map<String, String>): String {
+    private fun medusaV5(
+        url: String,
+        body: ByteArray?,
+        ts: Int,
+        who: Map<String, String>,
+        field21: Int? = null,
+    ): String {
         val query = sm3(url.substringAfter('?').toByteArray(Charsets.UTF_8))
         val f13 = hashF13(query, body?.let { digest("MD5", it) } ?: ByteArray(16), ts)
         val flags = hex("4480000000000000")
@@ -413,7 +425,7 @@ internal class Signer(
             f(15, proto(f(1, 305, "sint"), f(2, 4, "sint"), f(3, 694367, "sint"),
                 f(5, 1621072674, "sint"))),
             f(16, deviceToken),
-            f(17, ts, "sint"), f(20, "none"), f(21, V5Constants.field21, "sint"), f(23, env),
+            f(17, ts, "sint"), f(20, "none"), f(21, field21 ?: V5Constants.field21, "sint"), f(23, env),
             f(24, """{"cmr":16777216,"cmr2":16777216,"un_h":11,"vpn":0,"kd":0,"dyn":"","do":1,"tk":true}"""),
         )
         val nonce = rand()
@@ -544,6 +556,7 @@ internal class Signer(
         values: Map<String, String>,
         body: ByteArray? = null,
         now: Long = clock(),
+        field21: Int? = null,
     ): Request {
         val ts = (now / 1000).toInt()
         for (offset in 0..1023) {
@@ -558,7 +571,7 @@ internal class Signer(
                 "x-xs-from-web" to "0", "x-khronos" to ts.toString(),
                 "x-ladon" to be32(ts).base64(), "x-argus" to le32(ts).base64(),
                 "x-gorgon" to gorgon(query, body, ts, (random() * 65536).toInt()),
-                "x-helios" to helios(ts), "x-medusa" to medusa(url, body, ts, if (mobileV5) values else null),
+                "x-helios" to helios(ts), "x-medusa" to medusa(url, body, ts, if (mobileV5) values else null, field21),
             )
             if (mobileV5) headers.keys.retainAll(setOf("x-khronos", "x-helios", "x-medusa"))
             if (body != null) {
