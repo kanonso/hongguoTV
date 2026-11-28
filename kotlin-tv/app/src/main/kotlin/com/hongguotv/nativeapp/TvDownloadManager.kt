@@ -413,7 +413,7 @@ internal class TvDownloadManager(
                 currentDownloader.download { contentLength, bytesDownloaded, percentDownloaded ->
                     val currentBytes = maxBytes.updateAndGet { old -> maxOf(old, bytesDownloaded) }
                     if (currentBytes > MAX_FILE_BYTES) {
-                        if (sizeExceeded.compareAndSet(false, true)) downloader.cancel()
+                        if (sizeExceeded.compareAndSet(false, true)) currentDownloader.cancel()
                     } else if (currentBytes - reportedBytes.get() >= PROGRESS_INTERVAL || percentDownloaded >= 100f) {
                         reportedBytes.set(currentBytes)
                         update(task.id) {
