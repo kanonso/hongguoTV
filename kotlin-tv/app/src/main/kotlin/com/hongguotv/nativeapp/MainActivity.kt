@@ -2839,7 +2839,11 @@ class MainActivity : Activity() {
         val body = base(series.title)
         message(body, "正在加载剧集…")
         work(
-            { repository.detail(series.id) },
+            {
+                if (series.tags == "openhongguo") {
+                    Detail(series, openHongguoAdapter.listEpisodeIds(series.id))
+                } else repository.detail(series.id)
+            },
             { result ->
                 detail = result
                 library.observeFavorite(
