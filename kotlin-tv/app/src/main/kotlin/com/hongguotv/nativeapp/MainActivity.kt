@@ -3575,7 +3575,7 @@ class MainActivity : Activity() {
                             sourceOrder = playbackSourceSettings.order(),
                             enabledSources = if (data.series.source == "openhongguo")
                                 playbackSourceSettings.enabled().intersect(setOf("openhongguo"))
-                            else playbackSourceSettings.enabled() - "openhongguo",
+                            else playbackSourceSettings.enabled(),
                             openHongguoLadder = {
                                 if (data.series.source == "openhongguo") openHongguoAdapter.resolvePlayback(requestedId)
                                 else openHongguoAdapter.resolvePlaybackBySeriesTitle(data.series.title, selectedIndex + 1, data.episodes.size)
