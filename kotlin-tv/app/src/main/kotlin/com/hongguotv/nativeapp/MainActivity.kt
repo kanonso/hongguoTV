@@ -81,7 +81,7 @@ class MainActivity : Activity() {
     }
     private val playbackSourceSettings by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { PlaybackSourceSettings(applicationContext) }
     private val downloadManagerDelegate = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        TvDownloadManager(this) { episodeId, seriesTitle, episodeNumber, source ->
+        TvDownloadManager(this) { episodeId, seriesTitle, episodeNumber, episodeCount, source ->
             val configuredSources = playbackSourceSettings.enabled()
             val selectedSources = if (source == "openhongguo") configuredSources.intersect(setOf("openhongguo"))
                 else configuredSources
@@ -96,7 +96,7 @@ class MainActivity : Activity() {
                 enabledSources = selectedSources,
                 openHongguoLadder = {
                     if (source == "openhongguo") openHongguoAdapter.resolvePlayback(episodeId)
-                    else openHongguoAdapter.resolvePlaybackBySeriesTitle(seriesTitle, episodeNumber)
+                    else openHongguoAdapter.resolvePlaybackBySeriesTitle(seriesTitle, episodeNumber, episodeCount)
                 },
             ) { track -> track == null || CodecCapabilities.supports(track) }
                 ?: throw java.io.IOException("没有电视可播放的清晰度")
@@ -2637,7 +2637,7 @@ class MainActivity : Activity() {
                     })
                     setting("打开下载管理") { showDownloadManager(it) }
                     setting("查看下载目录位置") {
-                        tvTools.info("下载目录", getDir("downloads", Context.MODE_PRIVATE).absolutePath, it)
+                        tvTools.info("下载目录", java.io.File(filesDir, "downloads").absolutePath, it)
                     }
                 }
                 4 -> {
@@ -3137,11 +3137,17 @@ class MainActivity : Activity() {
         val secondary = row().apply { setPadding(0, dp(8), 0, 0) }
         info.addView(secondary)
         addButton(secondary, "下载第 ${episodeIndex + 1} 集") {
-            downloadManager.enqueue(data.series.id, data.series.title, data.episodes[episodeIndex], episodeIndex + 1, source = data.series.source)
+            downloadManager.enqueue(
+                data.series.id, data.series.title, data.episodes[episodeIndex],
+                episodeIndex + 1, source = data.series.source, episodeCount = data.episodes.size,
+            )
             showDownloadManager(play)
         }
         addButton(secondary, "批量下载全部 ${data.episodes.size} 集") {
-            downloadManager.enqueueAll(data.series.id, data.series.title, data.episodes, source = data.series.source)
+            downloadManager.enqueueAll(
+                data.series.id, data.series.title, data.episodes,
+                source = data.series.source, episodeCount = data.episodes.size,
+            )
             showDownloadManager(play)
         }
         accountFavoriteButton =
@@ -3572,7 +3578,7 @@ class MainActivity : Activity() {
                             else playbackSourceSettings.enabled() - "openhongguo",
                             openHongguoLadder = {
                                 if (data.series.source == "openhongguo") openHongguoAdapter.resolvePlayback(requestedId)
-                                else openHongguoAdapter.resolvePlaybackBySeriesTitle(data.series.title, selectedIndex + 1)
+                                else openHongguoAdapter.resolvePlaybackBySeriesTitle(data.series.title, selectedIndex + 1, data.episodes.size)
                             },
                         ) {
                             it == null || CodecCapabilities.supports(it)
