@@ -34,6 +34,6 @@ Kotlin + Android 原生 View + Media3，单 APK，默认 Android 6.0 / API 23；
 
 [发布流程](AUTO_UPDATES.md)沿用主线单仓库 Release。源代码推送或 PR 本身不会发布 APK；正式标签才触发发布。可先在本地完成构建、签名与发布材料校验，用户合并后再发布。
 
-[第三方声明](NOTICE.md) · [GPL-3.0](LICENSE) · [原功能分支验证](UPSTREAM_SYNC.md)
+[第三方声明](NOTICE.md) · [GPL-3.0](LICENSE) · [原功能分支验证](UPSTREAM_SYNC.md) · [Jackotom Android TV 整合记录](INTEGRATION_JACKOTOM.md)
 
 默认构建不带 FFmpeg；添加 `-PlegacyAudio=true` 构建 Android 5 兼容版。四种正式 APK（Android 5 通用、Android 6+ ARM32、ARM64 和通用） 与更新迁移见 [发布说明](AUTO_UPDATES.md)。
