@@ -108,7 +108,7 @@ internal class TvDownloadManager(
             persistLocked()
         }
         publish()
-        requestExecution()
+        requestWork()
         return id
     }
 
@@ -135,7 +135,7 @@ internal class TvDownloadManager(
         }
         if (items.isNotEmpty()) {
             publish()
-            requestExecution()
+            requestWork()
         }
     }
 
@@ -159,7 +159,12 @@ internal class TvDownloadManager(
             persistLocked()
         }
         publish()
-        requestExecution()
+        requestWork()
+    }
+
+    private fun requestWork() {
+        val alreadyExecuting = synchronized(lock) { executionAllowed && !executor.isShutdown }
+        if (alreadyExecuting) drain() else requestExecution()
     }
 
     fun resumePending() {
