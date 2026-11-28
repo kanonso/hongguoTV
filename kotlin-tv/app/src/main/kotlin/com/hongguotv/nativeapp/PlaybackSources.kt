@@ -297,26 +297,48 @@ internal fun openStream(
         val modelsEmpty = problem is EmptyPlaybackResponseException && problem.allPlaybackModelsEmpty
         val backupTimedOut = problem.isPlaybackTimeout() &&
             problem.suppressed.any { it is EmptyPlaybackResponseException }
-        if (speculative || (!modelsEmpty && !backupTimedOut)) throw problem
-        val pending = validation ?: throw problem
-        if (recentSources.find(id, maxQuality) !== pending.rendition) throw problem
-        val recovered = pending.take()
-        if (recovered == null) {
-            recentSources.forget(id, pending.rendition)
-            problem.addSuppressed(PlaybackDiagnosticException("recent-source=unavailable"))
+        if (speculative) throw problem
+        if (modelsEmpty || backupTimedOut) {
+            val pending = validation
+            if (pending != null && recentSources.find(id, maxQuality) === pending.rendition) {
+                val recovered = pending.take()
+                if (recovered != null && recentSources.find(id, maxQuality) === pending.rendition) {
+                    Log.i("HongguoTV", "Opened recently verified playback source")
+                    return recovered
+                }
+                recovered?.close()
+                recentSources.forget(id, pending.rendition)
+                problem.addSuppressed(PlaybackDiagnosticException("recent-source=unavailable"))
+            }
+        }
+        try {
+            val public = repository.publicWebsiteMp4Fallback(id)
+            Log.i("HongguoTV", "Trying official public MP4 fallback for episode")
+            return prepare(StreamLadder(listOf(public))) ?: throw problem
+        } catch (fallback: Exception) {
+            RequestScope.ensureActive()
+            problem.addSuppressed(fallback)
             throw problem
         }
-        if (recentSources.find(id, maxQuality) !== pending.rendition) {
-            recovered.close()
-            throw problem
-        }
-        Log.i("HongguoTV", "Opened recently verified playback source")
-        return recovered
     } finally {
         validation?.close()
     }
-    return prepare(ladder)?.also { opened ->
-        opened.rendition?.let { recentSources.remember(id, it, maxQuality) }
+    try {
+        return prepare(ladder)?.also { opened ->
+            opened.rendition?.let { recentSources.remember(id, it, maxQuality) }
+        } ?: throw IOException("未取得可播放片源")
+    } catch (problem: Exception) {
+        RequestScope.ensureActive()
+        if (speculative) throw problem
+        try {
+            val public = repository.publicWebsiteMp4Fallback(id)
+            Log.i("HongguoTV", "App playback tiers unavailable; trying official public MP4 fallback")
+            return prepare(StreamLadder(listOf(public))) ?: throw problem
+        } catch (fallback: Exception) {
+            RequestScope.ensureActive()
+            problem.addSuppressed(fallback)
+            throw problem
+        }
     }
 }
 
