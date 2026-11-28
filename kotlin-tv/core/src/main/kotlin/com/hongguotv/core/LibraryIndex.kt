@@ -8,13 +8,13 @@ import org.json.JSONObject
 
 /** Main-thread-owned library. JSON is parsed once, and getters never parse or sort. */
 class LibraryIndex(data: BackupData, updates: Map<String, FavoriteUpdate> = emptyMap()) {
-    private var favoriteRows = data.favorites.distinctBy { it.id }.take(500)
-    private var favoriteIds = favoriteRows.map { it.id }.toSet()
-    private var laterRows = data.later.distinctBy { it.id }.take(100)
-    private var laterIds = laterRows.map { it.id }.toSet()
+    private var favoriteRows = data.favorites.distinctBy { it.libraryKey }.take(500)
+    private var favoriteIds = favoriteRows.map { it.libraryKey }.toSet()
+    private var laterRows = data.later.distinctBy { it.libraryKey }.take(100)
+    private var laterIds = laterRows.map { it.libraryKey }.toSet()
     private var historyRows =
-        data.history.sortedByDescending { it.updatedAt }.distinctBy { it.series.id }.take(200)
-    private val progressById = historyRows.associateBy { it.series.id }.toMutableMap()
+        data.history.sortedByDescending { it.updatedAt }.distinctBy { it.series.libraryKey }.take(200)
+    private val progressById = historyRows.associateBy { it.series.libraryKey }.toMutableMap()
     private var watchedIds = data.watched.toSet()
     private var hiddenIds = data.hidden.take(500).toSet()
     private var searchRows = data.searches.take(20)
@@ -26,15 +26,23 @@ class LibraryIndex(data: BackupData, updates: Map<String, FavoriteUpdate> = empt
 
     fun favorite(id: String) = id in favoriteIds
 
+    fun favorite(series: Series) = series.libraryKey in favoriteIds
+
     fun later() = laterRows
 
     fun queued(id: String) = id in laterIds
+
+    fun queued(series: Series) = series.libraryKey in laterIds
 
     fun history() = historyRows
 
     fun progress(id: String) = progressById[id]
 
+    fun progress(series: Series) = progressById[series.libraryKey]
+
     fun watched(id: String) = id in watchedIds
+
+    fun watched(series: Series) = series.libraryKey in watchedIds
 
     fun watched() = watchedIds
 
@@ -46,42 +54,46 @@ class LibraryIndex(data: BackupData, updates: Map<String, FavoriteUpdate> = empt
 
     fun favoriteUpdate(id: String) = updateRows[id]
 
+    fun favoriteUpdate(series: Series) = updateRows[series.libraryKey]
+
     fun updatedFavorites() = updateCount
 
     fun toggle(series: Series): Boolean {
-        val added = !favorite(series.id)
+        val added = !favorite(series)
         favoriteRows =
             (if (added) listOf(series) + favoriteRows
-                else favoriteRows.filterNot { it.id == series.id })
+                else favoriteRows.filterNot { it.libraryKey == series.libraryKey })
                 .take(500)
-        favoriteIds = favoriteRows.map { it.id }.toSet()
+        favoriteIds = favoriteRows.map { it.libraryKey }.toSet()
         updateRows = updateRows.filterKeys { it in favoriteIds }
         updateCount = updateRows.values.count { it.added > 0 }
         return added
     }
 
     fun toggleLater(series: Series): Boolean {
-        val added = !queued(series.id)
+        val added = !queued(series)
         laterRows =
-            (if (added) listOf(series) + laterRows else laterRows.filterNot { it.id == series.id })
+            (if (added) listOf(series) + laterRows else laterRows.filterNot { it.libraryKey == series.libraryKey })
                 .take(100)
-        laterIds = laterRows.map { it.id }.toSet()
+        laterIds = laterRows.map { it.libraryKey }.toSet()
         return added
     }
 
     /** A paused player's identical checkpoint does not refresh its timestamp or trigger a write. */
     fun save(progress: BackupProgress): Boolean {
-        val previous = progressById[progress.series.id]
+        val previous = progressById[progress.series.libraryKey]
         if (previous != null && previous.copy(updatedAt = progress.updatedAt) == progress)
             return false
         historyRows =
-            (listOf(progress) + historyRows.filterNot { it.series.id == progress.series.id })
+            (listOf(progress) + historyRows.filterNot { it.series.libraryKey == progress.series.libraryKey })
                 .take(200)
                 .sortedByDescending { it.updatedAt }
         progressById.clear()
-        historyRows.forEach { progressById[it.series.id] = it }
+        historyRows.forEach { progressById[it.series.libraryKey] = it }
         return true
     }
+
+    fun setWatched(series: Series, value: Boolean): Boolean = setWatched(series.libraryKey, value)
 
     fun setWatched(id: String, value: Boolean): Boolean {
         if (watched(id) == value) return false
@@ -105,8 +117,10 @@ class LibraryIndex(data: BackupData, updates: Map<String, FavoriteUpdate> = empt
         searchRows = emptyList()
     }
 
+    fun removeHistory(series: Series) = removeHistory(series.libraryKey)
+
     fun removeHistory(id: String) {
-        historyRows = historyRows.filterNot { it.series.id == id }
+        historyRows = historyRows.filterNot { it.series.libraryKey == id }
         progressById.remove(id)
         watchedIds = watchedIds - id
     }
@@ -116,6 +130,9 @@ class LibraryIndex(data: BackupData, updates: Map<String, FavoriteUpdate> = empt
         progressById.clear()
         watchedIds = emptySet()
     }
+
+    fun observeFavorite(series: Series, count: Int, now: Long, acknowledge: Boolean): Boolean =
+        observeFavorite(series.libraryKey, count, now, acknowledge)
 
     fun observeFavorite(id: String, count: Int, now: Long, acknowledge: Boolean): Boolean {
         if (!favorite(id)) return false
