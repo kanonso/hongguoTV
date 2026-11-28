@@ -12,6 +12,7 @@ import okhttp3.CookieJar
 import okhttp3.ConnectionPool
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -985,7 +986,7 @@ constructor(
         )
         // One preferred request; the signed strategy pack may update only this allowlisted route.
         val configuredRoute = strategyRoute("video_tab")
-        if (disabledStrategyRoute("video_tab")) return null
+        if (playbackStrategy() != null && configuredRoute == null) return null
         for (host in listOf(PlayRetryPlan.hosts.first())) {
             val defaultUrl = "https://$host/reading/bookapi/video_tab/multi_video_model/v1/"
             val request = when {
@@ -1086,8 +1087,8 @@ constructor(
                 ?: throw IOException("播放设备尚未就绪") else playbackSession.profile(http)
             try {
                 val preloadRoute = strategyRoute("preload_current")
-                if (disabledStrategyRoute("preload_current")) {
-                    throw EmptyPlaybackResponseException("route=preload_current_disabled")
+                if (playbackStrategy() != null && preloadRoute == null) {
+                    throw EmptyPlaybackResponseException("route=preload_current_unavailable")
                 }
                 MobilePlayback.ladder(
                     id, profile.values, http, MobilePlayback.signer, clock(),
@@ -1126,8 +1127,12 @@ constructor(
                 if (rows.isNotEmpty()) return@withDeadline StreamLadder(rows)
 
                 // The tab model can contain only bytevc2. The mobile model on the same host can supply HEVC.
-                val alternateRoute = playbackStrategy()?.orderedRoutes()
+                val activePolicy = playbackStrategy()
+                val alternateRoute = activePolicy?.orderedRoutes()
                     ?.firstOrNull { it.id in setOf("player_b", "player_a") }
+                if (activePolicy != null && alternateRoute == null) {
+                    throw IOException("策略包未启用兼容播放器路线")
+                }
                 val alternateHost = alternateRoute?.url?.toHttpUrlOrNull()?.host ?: PlayRetryPlan.host(0)
                 try {
                     MobilePlayback.ladder(
@@ -1350,42 +1355,64 @@ constructor(
                         emptyPlaybackRounds >= IDENTITY_ROTATE_ROUNDS
                     } || previousIdentity.routes.exhausted(clock()))
                     var identity = if (shouldRefresh) refreshIdentity(previousIdentity) else previousIdentity
-                    val plan = identity.routes.plan(clock(), speculative)
-                    val pendingRoutes = java.util.ArrayDeque(plan)
+                    val signedPolicy = playbackStrategy()
+                    val routeIds = setOf("model_0", "model_1", "player_b", "player_a", "legacy")
+                    data class PlannedRoute(val transport: PlaybackRoutes.Route, val policy: PlaybackStrategyRoute?)
+                    val plannedRoutes: List<PlannedRoute> = if (signedPolicy != null) {
+                        signedPolicy.orderedRoutes().filter { it.id in routeIds }.map { policyRoute ->
+                            val host = policyRoute.url?.toHttpUrl()?.host ?: when (policyRoute.id) {
+                                "player_b", "legacy" -> PlayRetryPlan.hosts[0]
+                                "player_a", "model_0" -> PlayRetryPlan.hosts.getOrElse(1) { PlayRetryPlan.host(0) }
+                                "model_1" -> PlayRetryPlan.hosts.getOrElse(2) { PlayRetryPlan.host(0) }
+                                else -> PlayRetryPlan.host(0)
+                            }
+                            PlannedRoute(
+                                PlaybackRoutes.Route(single = policyRoute.id.startsWith("model_"), host = host),
+                                policyRoute,
+                            )
+                        }
+                    } else {
+                        identity.routes.plan(clock(), speculative).map { PlannedRoute(it, null) }
+                    }
+                    val pendingRoutes = java.util.ArrayDeque(plannedRoutes)
                     val payload =
                         """{"biz_param":{"detail_page_version":0,"device_level":1,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":${JSONArray(ids)}}}"""
                             .toByteArray()
                     var current: JSONObject? = null
                     var responseMap: JSONObject? = null
                     var lastError: IOException? = null
-                    var allEmpty = plan.isNotEmpty()
+                    var allEmpty = plannedRoutes.isNotEmpty()
                     var postCount = 0
                     var emptyPosts = 0
                     var attempts = 0
-                    while (attempts < (if (speculative) 1 else 4)) {
+                    val attemptLimit = if (speculative) 1 else if (signedPolicy != null) plannedRoutes.size else 4
+                    while (attempts < attemptLimit) {
                         if (pendingRoutes.isEmpty()) {
-                            // 已知路径全部为空时，在本轮剩余额度内恢复身份，不先弹错误再重跑整轮。
-                            if (!speculative && identity.routes.exhausted(clock())) {
+                            // Only the built-in route planner uses local cooldown/identity recovery.
+                            if (signedPolicy == null && !speculative && identity.routes.exhausted(clock())) {
                                 val replacement = refreshIdentity(identity)
                                 if (replacement !== identity) {
                                     identity = replacement
-                                    pendingRoutes.addAll(identity.routes.plan(clock(), false))
+                                    pendingRoutes.addAll(identity.routes.plan(clock(), false).map { PlannedRoute(it, null) })
                                 }
                             }
                             if (pendingRoutes.isEmpty()) break
                         }
-                        val route = pendingRoutes.removeFirst()
+                        val planned = pendingRoutes.removeFirst()
+                        val route = planned.transport
                         val attempt = attempts++
                         val client = transport(fresh = attempt > 0)
                         if (!route.single) postCount++
                         try {
                             val row = if (route.single) {
-                                singleVideoModel(id, identity, trace, client)
+                                singleVideoModel(id, identity, trace, client, planned.policy)
                             } else {
-                                val request = playbackRequest(
-                                    "https://${route.host}/novel/player/multi_video_model/v1/",
-                                    identity, body = payload,
-                                )
+                                val defaultUrl = "https://" + route.host + "/novel/player/multi_video_model/v1/"
+                                val request = if (planned.policy != null) {
+                                    strategyRequest(planned.policy, defaultUrl, identity, emptyMap(), payload)
+                                } else {
+                                    playbackRequest(defaultUrl, identity, body = payload)
+                                }
                                 val body = fetchPlaybackModel(request, client, trace, PlaybackRequestTrace.Stage.POST)
                                 val data = try { JSONObject(body) } catch (_: Exception) {
                                     throw IOException("播放信息格式异常")
@@ -1405,7 +1432,7 @@ constructor(
                             current = row
                             RequestScope.ensureActive()
                             identity.offerModel(id, row, playbackModelOwner, clock())
-                            identity.routes.success(route, clock())
+                            if (planned.policy == null) identity.routes.success(route, clock())
                             if (!speculative) resetPlaybackFailures()
                             break
                         } catch (error: IOException) {
@@ -1417,8 +1444,11 @@ constructor(
                             val empty = error is EmptyPlaybackResponseException
                             allEmpty = allEmpty && empty
                             if (!route.single && empty) emptyPosts++
-                            if (route.single || empty || PlayRetryPlan.temporary(error)) identity.routes.failed(route, clock(), empty)
-                            // 单集接口明确不支持该参数时可回退；拒绝/限流已在上方停止。批量格式错误不盲试。
+                            if (planned.policy == null &&
+                                (route.single || empty || PlayRetryPlan.temporary(error))) {
+                                identity.routes.failed(route, clock(), empty)
+                            }
+                            // 单集接口明确不支持该参数时可回退；拒绝/限流已在上方停止。
                             if (!route.single && !PlayRetryPlan.temporary(error)) throw error
                         } finally {
                             if (attempt > 0) client.connectionPool.evictAll()
