@@ -144,7 +144,7 @@ object CatalogSearchMerge {
         }
         val merged = (primary.items + supplemental.items)
             .filter { it.id.matches(Regex("[0-9]{6,30}")) && it.title.isNotBlank() }
-            .distinctBy { it.id }
+            .distinctBy { it.source to it.id }
             .sortedWith(compareBy<Series> { score(it) }.thenBy { it.title })
         return CatalogPage(
             items = merged,
