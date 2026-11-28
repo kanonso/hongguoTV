@@ -2559,7 +2559,7 @@ class MainActivity : Activity() {
                             copy.addView(text(source.description, 12f, if (source.available) muted else Color.rgb(208, 151, 84)))
                             row.addView(copy, lp(0, -2).apply { weight = 1f })
                             val state = if (!source.available) "Android 不可用" else if (id in enabled) "已啟用" else "已停用"
-                            row.addView(text(state, 12f, if (source.available && id in enabled) TvStyle.primary else muted))
+                            row.addView(text(state, 12f, if (source.available && id in enabled) accent else muted))
                             fun sourceAction(label: String, active: Boolean, tag: String, action: () -> Unit) {
                                 val control = Button(this).apply {
                                     text = label
@@ -2572,7 +2572,7 @@ class MainActivity : Activity() {
                                     setPadding(dp(8), 0, dp(8), 0)
                                     focusStyle(this)
                                     this.tag = tag
-                                    setOnClickListener(action)
+                                    setOnClickListener { action() }
                                 }
                                 row.addView(control, lp(-2, -2).apply { leftMargin = dp(4) })
                             }
@@ -2635,9 +2635,9 @@ class MainActivity : Activity() {
                     content.addView(text("下载文件保存在应用私有目录。可在剧集详情加入单集或整剧队列；下载期间保持应用运行。", 14f, muted).apply {
                         setPadding(0, 0, 0, dp(12))
                     })
-                    setting("打开下载管理") { showDownloadManager(it) }
+                    setting("打开下载管理") { showDownloadManager() }
                     setting("查看下载目录位置") {
-                        tvTools.info("下载目录", java.io.File(filesDir, "downloads").absolutePath, it)
+                        tvTools.info("下载目录", java.io.File(filesDir, "downloads").absolutePath, content)
                     }
                 }
                 4 -> {
@@ -2698,7 +2698,7 @@ class MainActivity : Activity() {
     private fun playDownloadedFile(path: String, title: String) {
         val file = java.io.File(path)
         if (!file.isFile || !file.canRead()) {
-            tvTools.info("本机视频", "下载文件不存在或无法读取。")
+            tvTools.info("本机视频", "下载文件不存在或无法读取。", root)
             return
         }
         sleepTimer.cancel()
@@ -2782,7 +2782,7 @@ class MainActivity : Activity() {
                         setPadding(dp(10), 0, dp(10), 0)
                         this.tag = tag
                         focusStyle(this)
-                        setOnClickListener(callback)
+                        setOnClickListener { callback() }
                     }
                     if (firstAction == null) firstAction = control
                     actions.addView(control, lp(-2, -2).apply { rightMargin = dp(6) })
