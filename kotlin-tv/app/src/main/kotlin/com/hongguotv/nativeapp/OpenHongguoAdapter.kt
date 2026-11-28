@@ -114,7 +114,8 @@ internal class OpenHongguoAdapter(context: Context) {
         val key = result.contentKey?.key?.let(::decodeContentKey)
         val rows = result.playback.streams.mapNotNull { stream ->
             if (stream.hls || stream.dash) return@mapNotNull null
-            if (stream.protected && key == null) return@mapNotNull null
+            // RemoteVideo currently understands fragmented MP4 CENC AES-CTR sample encryption only.
+            if (stream.protected && (key == null || stream.encryption.lowercase() != "cenc-aes-ctr")) return@mapNotNull null
             val url = safeHttps(stream.url)
             if (url.isBlank()) return@mapNotNull null
             val quality = Regex("(\\d{3,4})").find(stream.definition)?.groupValues?.get(1)?.toIntOrNull() ?: 0
