@@ -2639,11 +2639,29 @@ class MainActivity : Activity() {
                 4 -> {
                     lateinit var about: TextView
                     about = setting("关于hongguoTV") {
-                        tvTools.info("关于hongguoTV", "hongguoTV · 非官方客户端\n基于 N3urda/hongguoTV\n功能同步：tsukiyo-zero/hongguoTV\n版本：${BuildConfig.VERSION_NAME}\n项目：https://github.com/N3urda/hongguoTV\n\n本应用与红果官方无隶属关系。", about)
+                        tvTools.info("关于hongguoTV", "hongguoTV · 非官方客户端\n基于 N3urda/hongguoTV\n功能同步：tsukiyo-zero/hongguoTV\n版本：${BuildConfig.VERSION_NAME}\n整合项目：https://github.com/kanonso/hongguoTV\n\n本应用与红果官方无隶属关系。", about)
                     }
                     lateinit var license: TextView
-                    license = setting("开源许可") {
-                        tvTools.info("开源许可", "本原生版以 GPL-3.0 发布。\n内容协议与加密处理移植自 drpys（22261ad）。\nAndroidX Media3 / OkHttp：Apache-2.0\nKotlin：Apache-2.0\nBouncy Castle：MIT\n完整源码和许可证见 GitHub：N3urda/hongguoTV。", license)
+                    license = setting("开源许可与第三方声明") {
+                        val names = listOf(
+                            "OPENHONGGUO-APACHE-2.0.txt",
+                            "EDDSA-CC0-1.0.txt",
+                            "JACKOTOM-GPL-3.0.txt",
+                        )
+                        val fullText = buildString {
+                            append("本原生应用以 GPL-3.0-only 发布。完整许可证与第三方许可文本随 APK assets/licenses 分发。\n")
+                            append("openhongguo Android SDK 0.4.1：Apache-2.0\n")
+                            append("EdDSA-Java BloxBean patch 0.3.1：CC0 1.0\n")
+                            append("jackotom/hongguo-drama：GPL-3.0\n\n")
+                            names.forEach { name ->
+                                append("\n========== $name ==========\n")
+                                runCatching {
+                                    assets.open("licenses/$name").bufferedReader().use { append(it.readText()) }
+                                }.onFailure { append("无法读取许可证文件：${it.message}") }
+                                append("\n")
+                            }
+                        }
+                        tvTools.info("开源许可与第三方声明", fullText, license)
                     }
                 }
             }
