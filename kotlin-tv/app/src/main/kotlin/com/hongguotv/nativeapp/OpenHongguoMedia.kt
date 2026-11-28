@@ -39,6 +39,12 @@ internal data class OpenHongguoRepresentation(
             source = "openhongguo",
         )
     }
+
+    /** Never include the in-memory decryption key in logs or exception diagnostics. */
+    override fun toString(): String =
+        "OpenHongguoRepresentation(definition=$definition, quality=$quality, codec=$codec, " +
+            "width=$width, height=$height, bitrate=$bitrate, size=$size, kind=$kind, " +
+            "protected=$protected, encryption=$encryption, contentKey=${if (contentKey == null) "absent" else "<redacted>"})"
 }
 
 /** Complete resolved SDK model, including the separate DASH audio URL. */

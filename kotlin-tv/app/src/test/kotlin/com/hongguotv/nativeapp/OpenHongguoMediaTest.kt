@@ -2,6 +2,8 @@
 package com.hongguotv.nativeapp
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -37,6 +39,9 @@ class OpenHongguoMediaTest {
         assertNull(missing.toProgressiveRendition())
         assertNull(unsupported.toProgressiveRendition())
         assertEquals(16, valid.toProgressiveRendition()?.key?.size)
+        val rendered = valid.toString()
+        assertFalse(rendered.contains("000102030405060708090a0b0c0d0e0f"))
+        assertTrue(rendered.contains("<redacted>"))
     }
 
     private fun representation(
