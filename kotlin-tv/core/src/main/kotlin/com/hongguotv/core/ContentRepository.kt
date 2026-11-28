@@ -66,6 +66,10 @@ data class Series(
     val tags: String = "",
     val source: String = "hongguo",
 ) {
+    /** Stable local key; keep legacy Hongguo IDs unchanged for existing library data. */
+    val libraryKey: String
+        get() = if (source == "hongguo") id else "$source:$id"
+
     fun toJson() =
         JSONObject()
             .put("id", id)
@@ -85,7 +89,7 @@ data class Series(
                 o.str("description"),
                 o.str("badge"),
                 o.str("tags"),
-                o.str("source").ifBlank { "hongguo" },
+                o.str("source").takeIf { it.matches(Regex("[a-z0-9_-]{1,32}")) } ?: "hongguo",
             )
     }
 }
