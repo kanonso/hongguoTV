@@ -120,7 +120,7 @@ internal class OpenHongguoAdapter(context: Context) {
         val candidates = linkedMapOf<String, String>()
         var cursor: String? = null
         val seenCursors = mutableSetOf<String>()
-        repeat(5) {
+        for (pageIndex in 0 until 5) {
             val page = try {
                 runBlocking(Dispatchers.IO) {
                     client.search(seriesTitle, SearchOptions(cursor = cursor, pageSize = 50))
@@ -132,7 +132,7 @@ internal class OpenHongguoAdapter(context: Context) {
                 if (row.id.matches(Regex("[0-9]{6,30}")) && normalizeTitle(row.title) == target)
                     candidates[row.id] = row.title
             }
-            if (!page.hasMore || page.cursor.isBlank() || !seenCursors.add(page.cursor)) return@repeat
+            if (!page.hasMore || page.cursor.isBlank() || !seenCursors.add(page.cursor)) break
             cursor = page.cursor
         }
         if (candidates.isEmpty()) throw IOException("openhongguo 没有找到同名剧集，安全跳过该来源")
