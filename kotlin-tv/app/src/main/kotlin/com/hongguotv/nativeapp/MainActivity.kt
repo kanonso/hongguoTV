@@ -3220,6 +3220,7 @@ class MainActivity : Activity() {
                             CodecCapabilities::supports,
                             recentPlaybackSources,
                             metadataAhead = data.episodes.drop(selectedIndex + 1).take(2),
+                            openHongguoLadder = { openHongguoAdapter.resolvePlayback(requestedId) },
                         ) {
                             it == null || CodecCapabilities.supports(it)
                         }
