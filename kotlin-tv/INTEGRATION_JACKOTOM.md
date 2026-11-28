@@ -1,94 +1,132 @@
 # Jackotom Android TV integration (draft)
 
-This document describes the Android-native integration in the stacked branch
-feature/jackotom-android-tv-integration. It is not a production release record.
+This is an Android-native integration branch for the formal target repository
+kanonso/hongguoTV. It is a stacked Draft PR and is not a production release record.
+The default main branch is unchanged.
 
 ## Search and provider identity
 
-For short dramas, the TV search flow merges:
+For short dramas, TV search independently queries and merges:
 1. The existing signed Hongguo App search.
-2. The public Hongguo website search.
+2. The official public website search.
 3. The official openhongguo Android SDK search.
 
-Results are de-duplicated by provider ID and ranked with exact/prefix title matches first.
-Separate seasons remain separate entries. Comic search keeps its existing App-only tab and
-cursor contract; it is not mixed with short-drama web results.
+Results are de-duplicated by provider ID, ranked with exact/prefix title matches first,
+and retain separate seasons. If title text does not prove a match, server-returned aliases
+and pinyin matches are kept rather than silently discarded. Motion-comic search keeps its
+existing App-only tab and pagination contract.
 
-Each result carries an explicit Series.source identity. An openhongguo result uses
-openhongguo's own episode directory and playback API. Its IDs are never silently sent to
-Hongguo App or website playback endpoints. This prevents an unrelated title from being
-played after a cross-provider ID collision.
+Every result has an explicit Series.source identity. An openhongguo result uses that SDK's
+own paginated episode directory and playback IDs. A Hongguo-native result can try an
+openhongguo crosswalk only after a case/Unicode-normalized exact full-title match and an
+unambiguous 1-based episode-number match. If the series or episode mapping is missing or
+ambiguous, openhongguo is skipped and the configured remaining sources are tried. An
+arbitrary provider's episode ID is never sent to a different provider.
 
-## Playback source order
+## Four playback sources
 
-The Android TV settings store an ordered and enabled list:
+The source settings persist order and enablement. For a Hongguo-native result the outer
+resolver tries enabled sources in the user-selected order:
 
-| ID | Current Android status | Notes |
+| ID | Android status | Integration |
 | --- | --- | --- |
-| openhongguo | Implemented | Apache-2.0 Android AAR 0.4.1; own no-backup anonymous profile; search, paginated episode list and progressive playback resolver. |
-| sdk | Not available on Android | Jackotom's current SDK helper binaries target macOS/Windows; there is no Android TV executable. The UI marks this source unavailable and playback safely skips it. |
-| app | Existing native path | Uses the target app's current signed App playback/model/compatibility code. Jackotom's remotely signed source-policy pack update mechanism has not yet been ported; this is not represented as a verified remote dynamic policy updater. |
-| web | Guarded fallback | Uses the official public full-MP4 endpoint only when it returns an allowed HTTPS CDN URL, not an advertised preview or an inferred media URL. |
+| openhongguo | Implemented | Apache-2.0 Android AAR 0.4.1; independent no-backup anonymous profile; search, paginated episodes, progressive HTTPS playback, and guarded exact-title/episode crosswalk. |
+| sdk | Not available on Android | Current jackotom helper binaries target macOS/Windows; no Android TV executable is present. The UI marks it unavailable and playback safely skips it. |
+| app | Implemented | Existing signed App path plus the project-signed dynamic strategy pack. Its ordered routes cover preload_current, video_tab, player_b, player_a, model_0, model_1 and legacy. |
+| web | Guarded fallback | Official public full-MP4 endpoint only when the endpoint itself returns a complete, unexpired HTTPS CDN URL from the allowlist. It does not use previews or infer a media URL. |
 
-For Hongguo-native result IDs, the configured enabled order is applied. For an
-openhongguo result, only openhongguo is attempted until a real, validated ID crosswalk
-exists. The app must not send an arbitrary provider's episode ID to a different provider.
-HLS/DASH streams are currently skipped by this progressive RemoteVideo adapter.
+For an openhongguo-origin series, playback and downloads remain on openhongguo unless a
+validated crosswalk is explicitly used for a Hongguo-native result. HLS/DASH streams are
+currently skipped by the progressive RemoteVideo adapter. The SDK helper is not presented
+as working on Android.
 
-## Native downloads
+## Signed App strategy pack
 
-The Android TV downloader is a Kotlin implementation, not the Electron downloader UI.
-It provides a serialized queue, persisted task state, single-episode and whole-series enqueue,
-pause/resume/retry/cancel/remove, progress, and local playback. Files are stored in the
-application-private filesDir/downloads directory.
+The current upstream signed JSON pack is bundled as the initial policy. The Android
+PlaybackStrategyPackManager:
+- verifies Ed25519 signatures against the two pinned project public keys;
+- checks the canonical JSON bytes, key ID, format, project ID, revision and validity dates;
+- accepts only the seven known route IDs, HTTPS hosts under fqnovel.com/snssdk.com,
+  the v5/player/none signing families, a short header allowlist and bounded JSON fields;
+- rejects identity/time-field overrides and unapproved headers or URLs;
+- applies route order, version/query overrides, nested JSON body overrides and field21
+  to the existing native request/signing path (JSON request bodies are gzip-compressed
+  before signing);
+- checks the configured mirrors at startup and every six hours while the TV app process is
+  running; only a verified higher revision is activated;
+- persists the active and previous envelope, exposes version/status/last-check state,
+  supports automatic-check enable/disable, immediate refresh, rollback and restore-embedded.
 
-Downloads use the same verified OpenedStream / RemoteVideo path as playback, so
-the saved bytes follow the app's decrypted media reader rather than saving encrypted raw
-segments. Resume checks total length, the stored provider, the remote prefix fingerprint,
-and the local partial-file prefix before appending. Incompatible or corrupted partial files
-are restarted from byte zero. The current per-file limit is 2 GiB.
+The downloaded pack is data-only. No remote JavaScript, shell, executable or arbitrary
+code is evaluated. A missing/disabled route in an active verified policy is not silently
+replaced with an unreviewed fallback URL. The App source retains its existing bounded
+failure and compatibility behavior.
 
-A source may refuse download even when it permits online playback. The UI must show that
-failure and must not claim that a stream-only URL is a downloadable file.
+## Native downloader
 
-## Android-native UI
+The Kotlin TV downloader provides a serialized persistent queue, single-episode and
+whole-series enqueue, progress, pause/resume/retry/cancel/remove, provider identity,
+and local playback. Files are stored in the application-private filesDir/downloads directory.
 
-The source settings and download manager are native TV views/dialogs, with focusable
-controls for a remote. The source page exposes order, enable/disable and availability.
-The download page exposes task state/progress and pause/resume/cancel/retry/delete/local play.
-The existing search/catalog/detail/player UI remains the host application.
+It uses the same verified OpenedStream / RemoteVideo byte reader as playback, then saves
+the processed media rather than encrypted raw bytes. Resume checks total length, provider,
+remote prefix fingerprint and the local partial-file prefix before appending. Corrupt or
+mismatched partial files restart at byte zero. The current per-file limit is 2 GiB.
 
-## Build and test
+The downloader runs in the app process; keep the app open while a task is downloading.
+On Activity/process shutdown, active work is closed and persisted tasks return as paused
+when the app is reopened. There is no separate always-on foreground download service in
+this draft. A provider may allow online playback but refuse a download; the task reports
+that failure rather than claiming success.
+
+## Android TV UI
+
+The source settings and download manager are native focusable TV views/dialogs. The source
+page exposes priority (direct up/down controls), enablement, availability, strategy-pack
+revision/status, refresh and rollback. The download page exposes task state/progress and
+pause/resume/cancel/retry/delete/local play. The existing search/catalog/detail/player UI
+remains the host app.
+
+The About / Open Source Licenses page loads the Apache-2.0, CC0 and GPL-3.0 texts bundled
+inside APK assets/licenses.
+
+## Build and validation
 
 From the repository root:
 
     ./kotlin-tv/gradlew -p kotlin-tv :core:test :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 
-The GitHub Actions Debug artifact is a test build only. Production signing requires the
-original distribution keystore and a verified certificate fingerprint. No replacement key
-is allowed to masquerade as the existing app's signing identity.
+GitHub Actions Debug artifacts are test builds only. Node/React Native checks have passed
+on several recent commits; the most recent Kotlin, lint and Debug candidate results must
+be checked against the exact branch SHA before declaring a build successful. Physical TV
+testing remains a separate gate.
+
+Production signing requires the original distribution keystore and a verified certificate
+fingerprint. No replacement key is allowed to masquerade as the existing app's signing
+identity. The original release keystore has not yet been recovered, so no production
+update APK or formal Release is produced by this integration branch.
 
 ## Known limitations before declaring this integration complete
 
-- The Android SDK helper source is unavailable as an Android binary and remains visibly disabled.
-- The signed remote strategy-pack update system is not yet ported; the existing App playback
-  path is used instead.
-- The openhongguo adapter currently accepts progressive HTTPS streams; HLS/DASH and
-  devices/codecs not accepted by the current RemoteVideo path are not yet adapted.
-- The public MP4 fallback works only when the official endpoint itself returns a complete,
-  valid media URL. It does not unlock protected or preview-only content.
-- Real Android TV remote navigation, playback, downloads, pause/resume, storage exhaustion,
-  process death/restart, and device-specific codec tests remain pending. CI success is not
-  a substitute for physical-device validation.
-- The original release keystore has not been found. Debug builds can be tested in parallel;
-  production update APKs cannot replace the existing install until the original certificate
-  is restored or a separately planned data-migration/re-signing path is accepted.
+- The SDK helper source is unavailable as an Android binary and remains visibly disabled.
+- openhongguo playback currently accepts progressive HTTPS streams; HLS/DASH and devices
+  or codecs not accepted by RemoteVideo are not adapted yet.
+- Exact-title cross-provider mapping intentionally skips ambiguous or differently titled
+  seasons; a provider-native ID crosswalk is still preferable where one is published.
+- The public MP4 fallback only works when the official endpoint returns a complete valid
+  media URL. It does not unlock protected, locked or preview-only content.
+- Physical Android TV remote focus, device-specific codec negotiation, playback failover,
+  queue pause/resume, process death/restart, low-storage, and local playback tests remain
+  pending. CI success is not a substitute for physical-device validation.
+- The downloader currently runs only while the app process is active; background/foreground
+  service support remains a later hardening task.
 
 ## Upstream and license notes
 
-- jackotom/hongguo-drama is GPL-3.0. Its Android TV and source/download architecture
-  informed the port; any copied or adapted GPL-covered code must retain the original
-  copyright/license notices and corresponding source obligations.
-- beilunyang/openhongguo Android AAR 0.4.1 is Apache-2.0 and is consumed as a separate
-  dependency. Its license and notice must accompany distributed APKs.
-- The target native application is GPL-3.0-only; see LICENSE and NOTICE.md.
+- jackotom/hongguo-drama is GPL-3.0. Its Android TV/source/download architecture informed
+  the port. GPL-covered adapted material retains the relevant license and notices.
+- beilunyang/openhongguo Android AAR 0.4.1 is Apache-2.0.
+- bloxbean/ed25519-java 0.3.1 is CC0 1.0 Universal and is used for Android-compatible
+  Ed25519 verification.
+- The target native app is GPL-3.0-only. Relevant license texts are in LICENSE,
+  NOTICE.md and app/src/main/assets/licenses/.
