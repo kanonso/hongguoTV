@@ -117,3 +117,40 @@ internal object SearchPayload {
     private fun normalized(value: String): String = Normalizer.normalize(value, Normalizer.Form.NFKC)
         .lowercase(Locale.ROOT).filter { it.isLetterOrDigit() }
 }
+
+
+/**
+ * Merge search pages from independent catalogs. IDs are source identifiers and are only deduplicated
+ * when identical; differently numbered seasons remain separate. Exact and prefix title matches rank
+ * first, while the caller retains each provider's pagination state.
+ */
+object CatalogSearchMerge {
+    fun merge(primary: CatalogPage, supplemental: CatalogPage, keyword: String): CatalogPage {
+        val query = normalize(keyword)
+        fun score(item: Series): Int {
+            val title = normalize(item.title)
+            return when {
+                title == query -> 0
+                query.isNotEmpty() && title.startsWith(query) -> 1
+                query.isNotEmpty() && title.contains(query) -> 2
+                query.isNotEmpty() && query.contains(title) -> 3
+                else -> 4
+            }
+        }
+        val merged = (primary.items + supplemental.items)
+            .filter { it.id.matches(Regex("[0-9]{6,30}")) && it.title.isNotBlank() }
+            .distinctBy { it.id }
+            .sortedWith(compareBy<Series> { score(it) }.thenBy { it.title })
+        return CatalogPage(
+            items = merged,
+            hasMore = primary.hasMore || supplemental.hasMore,
+            ranking = primary.ranking ?: supplemental.ranking,
+            discovery = primary.discovery ?: supplemental.discovery,
+            trialHints = primary.trialHints + supplemental.trialHints,
+        )
+    }
+
+    private fun normalize(value: String): String = java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFKC)
+        .lowercase(java.util.Locale.ROOT)
+        .replace(Regex("[\\s\\p{P}\\p{S}]+"), "")
+}
