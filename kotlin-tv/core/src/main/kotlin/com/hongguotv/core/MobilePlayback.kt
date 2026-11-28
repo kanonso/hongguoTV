@@ -18,6 +18,15 @@ internal data class MobileSignedRequest(val url: String, val headers: Map<String
 
 internal fun interface MobilePlaybackSigner {
     fun sign(url: String, body: ByteArray, device: Map<String, String>): MobileSignedRequest
+
+    /** Strategy packs can select a verified V5 field21 variant without changing test/custom signers. */
+    fun signWithField21(
+        url: String,
+        body: ByteArray,
+        device: Map<String, String>,
+        field21: Int?,
+    ): MobileSignedRequest = sign(url, body, device)
+
     val currentAppProtocol: Boolean get() = false
 }
 
@@ -26,11 +35,25 @@ internal object MobilePlayback {
     private val v5Signer = Signer(mobileV5 = true)
     val signer = object : MobilePlaybackSigner {
         override val currentAppProtocol = true
-        override fun sign(url: String, body: ByteArray, device: Map<String, String>): MobileSignedRequest {
+        override fun sign(url: String, body: ByteArray, device: Map<String, String>): MobileSignedRequest =
+            signWithField21(url, body, device, null)
+
+        override fun signWithField21(
+            url: String,
+            body: ByteArray,
+            device: Map<String, String>,
+            field21: Int?,
+        ): MobileSignedRequest {
             val parsed = url.toHttpUrl()
             val values = parsed.queryParameterNames.associateWith { parsed.queryParameter(it)!! }
             val now = values.getValue("_rticket").toLong()
-            val request = v5Signer.signPlayback(parsed.newBuilder().query(null).build().toString(), values, body, now)
+            val request = v5Signer.signPlayback(
+                parsed.newBuilder().query(null).build().toString(),
+                values,
+                body,
+                now,
+                field21,
+            )
             return MobileSignedRequest(request.url, request.headers)
         }
     }
@@ -74,7 +97,7 @@ internal object MobilePlayback {
         val url = base.toHttpUrl().newBuilder().query(null)
             .apply { values.forEach { (k, v) -> addQueryParameter(k, v) } }.build()
         val signed = when (strategyRoute?.auth ?: "v5") {
-            "v5" -> signing.sign(url.toString(), ByteArray(0), device)
+            "v5" -> signing.signWithField21(url.toString(), ByteArray(0), device, strategyRoute?.field21)
             "player" -> {
                 val query = Signer.encode(values + ("_rticket" to now.toString()))
                 MobileSignedRequest(
@@ -142,7 +165,7 @@ internal object MobilePlayback {
         val bytes = output.toByteArray()
         val auth = strategyRoute?.auth ?: "v5"
         val signed = when (auth) {
-            "v5" -> signer.sign(url.toString(), bytes, device)
+            "v5" -> signer.signWithField21(url.toString(), bytes, device, strategyRoute?.field21)
             "player" -> {
                 val signedQuery = Signer.encode(queryValues + ("_rticket" to now.toString()))
                 MobileSignedRequest(
