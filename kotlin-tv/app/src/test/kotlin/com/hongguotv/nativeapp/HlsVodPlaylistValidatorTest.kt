@@ -69,6 +69,52 @@ seg.ts
     }
 
     @Test
+    fun rejectsInsecureSubtitleAndIframeUris() {
+        assertThrows(java.io.IOException::class.java) {
+            HlsVodPlaylistValidator.validate("https://media.invalid/master.m3u8") {
+                """#EXTM3U
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="captions",URI="http://unsafe.invalid/subs.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000
+video.m3u8
+"""
+            }
+        }
+        assertThrows(java.io.IOException::class.java) {
+            HlsVodPlaylistValidator.validate("https://media.invalid/master.m3u8") {
+                """#EXTM3U
+#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=10000,URI="http://unsafe.invalid/iframe.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000
+video.m3u8
+"""
+            }
+        }
+    }
+
+    @Test
+    fun rejectsLowLatencyPreloadHintsAndNonIdentityKeyFormats() {
+        assertThrows(java.io.IOException::class.java) {
+            HlsVodPlaylistValidator.validate("https://media.invalid/low-latency.m3u8") {
+                """#EXTM3U
+#EXT-X-PRELOAD-HINT:TYPE=PART,URI="part.ts"
+#EXTINF:4,
+seg.ts
+#EXT-X-ENDLIST
+"""
+            }
+        }
+        assertThrows(java.io.IOException::class.java) {
+            HlsVodPlaylistValidator.validate("https://media.invalid/keyformat.m3u8") {
+                """#EXTM3U
+#EXT-X-KEY:METHOD=AES-128,KEYFORMAT="com.example.drm",URI="key.bin"
+#EXTINF:4,
+seg.ts
+#EXT-X-ENDLIST
+"""
+            }
+        }
+    }
+
+    @Test
     fun rejectsUnverifiedSessionKeys() {
         assertThrows(java.io.IOException::class.java) {
             HlsVodPlaylistValidator.validate("https://media.invalid/session-key.m3u8") {

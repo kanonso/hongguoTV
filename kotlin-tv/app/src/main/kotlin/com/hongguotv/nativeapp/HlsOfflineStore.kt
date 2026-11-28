@@ -50,6 +50,7 @@ internal object HlsVodPlaylistValidator {
     private const val MAX_DEPTH = 4
     private val uriAttribute = Regex("""URI="([^"]+)"""")
     private val encryptionMethod = Regex("""METHOD=([A-Z0-9-]+)""")
+    private val keyFormat = Regex("""KEYFORMAT="([^"]+)"""")
 
     fun validate(rootUrl: String, load: (String) -> String): HlsVodPlaylistStats {
         val state = State()
@@ -84,7 +85,10 @@ internal object HlsVodPlaylistValidator {
         val lines = text.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
         if (lines.firstOrNull() != "#EXTM3U") throw IOException("HLS 播放清單格式無效")
         if (lines.any { it.startsWith("#EXT-X-DEFINE") }) throw IOException("HLS 動態變數尚未支援")
-        if (lines.any { it.startsWith("#EXT-X-PART:") || it.startsWith("#EXT-X-SKIP:") }) {
+        if (lines.any {
+                it.startsWith("#EXT-X-PART:") || it.startsWith("#EXT-X-SKIP:") ||
+                    it.startsWith("#EXT-X-PRELOAD-HINT:") || it.startsWith("#EXT-X-RENDITION-REPORT:")
+            }) {
             throw IOException("HLS 低延遲／增量播放清單尚未支援")
         }
         if (lines.any { it.startsWith("#EXT-X-SESSION-KEY:") }) {
@@ -96,6 +100,10 @@ internal object HlsVodPlaylistValidator {
                     ?: throw IOException("HLS 加密方法欄位缺失")
                 if (method !in setOf("NONE", "AES-128")) {
                     throw IOException("HLS 加密方法 $method 尚未支援")
+                }
+                val format = keyFormat.find(line)?.groupValues?.get(1)
+                if (format != null && format != "identity") {
+                    throw IOException("HLS KEYFORMAT $format 尚未支援")
                 }
             }
 
@@ -109,12 +117,19 @@ internal object HlsVodPlaylistValidator {
                     expectsVariantUri = false
                 }
                 line.startsWith("#EXT-X-MEDIA:") -> {
-                    val type = Regex("""TYPE=([A-Z0-9-]+)""").find(line)?.groupValues?.get(1)
-                    if (type == "AUDIO") {
-                        uriAttribute.find(line)?.groupValues?.get(1)?.let {
-                            childPlaylists += resolveHttps(url, it)
-                        }
+                    uriAttribute.find(line)?.groupValues?.get(1)?.let {
+                        // Audio and subtitle renditions are child playlists too. Validate all URI
+                        // references before Media3 can follow them.
+                        childPlaylists += resolveHttps(url, it)
                     }
+                }
+                line.startsWith("#EXT-X-I-FRAME-STREAM-INF:") -> {
+                    uriAttribute.find(line)?.groupValues?.get(1)?.let {
+                        childPlaylists += resolveHttps(url, it)
+                    }
+                }
+                line.startsWith("#EXT-X-SESSION-DATA:") -> {
+                    uriAttribute.find(line)?.groupValues?.get(1)?.let { resolveHttps(url, it) }
                 }
                 !line.startsWith("#") -> {
                     resolveHttps(url, line)
