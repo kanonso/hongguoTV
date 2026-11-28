@@ -2,6 +2,7 @@
 package com.hongguotv.nativeapp
 
 import android.content.Context
+import com.hongguotv.core.RemoteVideo
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
