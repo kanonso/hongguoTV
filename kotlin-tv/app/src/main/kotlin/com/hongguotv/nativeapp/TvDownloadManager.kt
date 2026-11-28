@@ -52,7 +52,7 @@ internal fun downloadGroupKey(task: TvDownloadTask): Pair<String, String> = task
 /**
  * Android TV download queue. Downloads use the same verified, decoder-compatible, decrypted
  * RemoteVideo pipeline as playback; only complete app-authorized progressive streams are saved.
- * Work is serialized, persisted, cancellable and resumable after verifying the media identity.
+ * Work is bounded to the configured worker count, persisted, cancellable and resumable after verifying the media identity.
  */
 @UnstableApi
 internal class TvDownloadManager(

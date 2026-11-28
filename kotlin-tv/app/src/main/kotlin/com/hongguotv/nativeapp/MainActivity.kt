@@ -1210,7 +1210,7 @@ class MainActivity : Activity() {
                     restoreProgress = library::progress,
                     saveProgress = { progress, count, force ->
                         library.save(progress)
-                        if (progress.series.source == "hongguo") cloudAccount.upload(CloudProgress(progress.series, progress.episodeId,
+                        if (EpisodeSourcePolicy.canSyncHongguoCloudProgress(progress.series, data.episodeSource)) cloudAccount.upload(CloudProgress(progress.series, progress.episodeId,
                             progress.episodeIndex, progress.position, progress.duration, progress.updatedAt),
                             count, force || progress.completed || !foreground)
                     },
@@ -3355,7 +3355,7 @@ class MainActivity : Activity() {
                     showCatalog()
                     return@work
                 }
-                val progress = detailProgress(result, preferCloud = cloudProgress != null)
+                val progress = detailProgress(result, preferCloud = cloudProgress != null && result.episodeSource == result.series.source)
                 val target =
                     ResumePlayback.target(
                         result.episodes,
@@ -3396,9 +3396,10 @@ class MainActivity : Activity() {
             data,
             library.progress(data.series),
             detailCloudProgress?.takeIf {
-                cloudAccount.signedIn && detailCloudScope == cloudAccount.historyScope
+                data.episodeSource == data.series.source &&
+                    cloudAccount.signedIn && detailCloudScope == cloudAccount.historyScope
             },
-            preferCloud,
+            preferCloud && data.episodeSource == data.series.source,
         )
 
     private fun showDetail(focusEpisode: Boolean) {
@@ -4326,7 +4327,7 @@ class MainActivity : Activity() {
                 System.currentTimeMillis(),
             )
         library.save(old)
-        if (old.series.source == "hongguo") cloudAccount.upload(
+        if (EpisodeSourcePolicy.canSyncHongguoCloudProgress(old.series, data.episodeSource)) cloudAccount.upload(
             CloudProgress(
                 old.series,
                 old.episodeId,
