@@ -2794,7 +2794,7 @@ class MainActivity : Activity() {
                     }
                     TvDownloadStatus.PAUSED, TvDownloadStatus.FAILED -> {
                         action("继续／重试", "download-action:${task.id}:resume") { downloadManager.resume(task.id) }
-                        action("取消") { downloadManager.cancel(task.id) }
+                        action("取消", "download-action:${task.id}:cancel") { downloadManager.cancel(task.id) }
                     }
                     TvDownloadStatus.COMPLETED -> {
                         action("本机播放", "download-action:${task.id}:play") { playDownloadedFile(task.filePath, task.seriesTitle) }
