@@ -1210,7 +1210,7 @@ class MainActivity : Activity() {
                     restoreProgress = library::progress,
                     saveProgress = { progress, count, force ->
                         library.save(progress)
-                        if (EpisodeSourcePolicy.canSyncHongguoCloudProgress(progress.series, data.episodeSource)) cloudAccount.upload(CloudProgress(progress.series, progress.episodeId,
+                        if (progress.series.source == "hongguo") cloudAccount.upload(CloudProgress(progress.series, progress.episodeId,
                             progress.episodeIndex, progress.position, progress.duration, progress.updatedAt),
                             count, force || progress.completed || !foreground)
                     },
@@ -5635,7 +5635,7 @@ class MainActivity : Activity() {
                 System.currentTimeMillis(),
             )
         library.save(progress)
-        if (progress.series.source == "hongguo") cloudAccount.upload(
+        if (EpisodeSourcePolicy.canSyncHongguoCloudProgress(progress.series, data.episodeSource)) cloudAccount.upload(
             CloudProgress(
                 progress.series,
                 progress.episodeId,
