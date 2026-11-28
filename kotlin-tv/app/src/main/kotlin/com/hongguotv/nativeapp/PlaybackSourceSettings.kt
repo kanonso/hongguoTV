@@ -7,7 +7,10 @@ import android.content.Context
  * TV playback source preferences. The order is persisted independently from the app account/profile.
  * The SDK helper is intentionally marked unavailable until an Android-native adapter exists.
  */
-internal class PlaybackSourceSettings(context: Context) {
+internal class PlaybackSourceSettings(
+    context: Context,
+    openHongguoAvailable: Boolean = true,
+) {
     data class Source(
         val id: String,
         val title: String,
@@ -19,7 +22,13 @@ internal class PlaybackSourceSettings(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("playback-source-settings", Context.MODE_PRIVATE)
 
     val sources = listOf(
-        Source("openhongguo", "openhongguo 社區 Android SDK", "只播放 openhongguo 搜尋結果；不跨用紅果官方分集 ID", true, true),
+        Source(
+            "openhongguo",
+            "openhongguo 社區 Android SDK",
+            "只播放 openhongguo 搜尋結果；不跨用紅果官方分集 ID",
+            openHongguoAvailable,
+            openHongguoAvailable,
+        ),
         Source("sdk", "SDK helper", "目前上游 helper 沒有 Android TV 執行檔；原生移植完成前不可用", false, false),
         Source("app", "官方 App 播放來源", "使用目前原生 App 簽名播放模型與 TV 相容性處理；遠端策略包更新仍待移植", true, true),
         Source("web", "官網公開 MP4", "官方公開完整 MP4 兜底；畫質可能較低", true, true),

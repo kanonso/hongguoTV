@@ -79,7 +79,9 @@ class MainActivity : Activity() {
         return "策略版本：${status.revision} · 路由：${status.routeCount} 条 · 来源：${status.source}\n发布时间：$issued\n最近检查：$checked\n" +
             (status.error.takeIf { it.isNotBlank() }?.let { "状态：$it" } ?: "签名校验：已启用")
     }
-    private val playbackSourceSettings by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { PlaybackSourceSettings(applicationContext) }
+    private val playbackSourceSettings by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        PlaybackSourceSettings(applicationContext, openHongguoAdapter.isRuntimeAvailable)
+    }
     // Application-scoped queue: downloads must not retain or depend on this Activity.
     private val downloadManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         TvDownloadRuntime.get(applicationContext, schedulePending = true)
@@ -2851,7 +2853,12 @@ class MainActivity : Activity() {
             if (failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
             Result.failure(failure)
         }
-        val community = runCatching { openHongguoAdapter.search(query, requestedPage) }
+        val community =
+            if (openHongguoAdapter.isRuntimeAvailable) {
+                runCatching { openHongguoAdapter.search(query, requestedPage) }
+            } else {
+                Result.success(CatalogPage(emptyList(), false))
+            }
         if (primary.isFailure && community.isFailure) {
             throw java.io.IOException("红果搜索来源暂时都不可用，请稍后重试", primary.exceptionOrNull())
         }

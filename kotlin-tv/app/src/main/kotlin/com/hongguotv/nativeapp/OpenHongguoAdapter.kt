@@ -25,6 +25,25 @@ import java.util.Locale
  */
 internal class OpenHongguoAdapter(context: Context) {
     private val appContext = context.applicationContext
+
+    /**
+     * The upstream SDK is a gomobile AAR and loads libgojni.so before its Kotlin API can be used.
+     * Robolectric/JVM tests do not load Android ABI libraries, so keep that native boundary out
+     * of host-side tests and expose the real device capability to source settings.
+     */
+    internal val isRuntimeAvailable: Boolean
+        get() = runCatching {
+            val directory = appContext.applicationInfo.nativeLibraryDir
+            !directory.isNullOrBlank() &&
+                java.io.File(directory, System.mapLibraryName("gojni")).isFile
+        }.getOrDefault(false)
+
+    private fun requireRuntime() {
+        if (!isRuntimeAvailable) {
+            throw IOException("openhongguo Android SDK 原生执行库未载入")
+        }
+    }
+
     private val client: OpenhongguoClient by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         OpenhongguoClient.create(
             appContext,
@@ -40,6 +59,7 @@ internal class OpenHongguoAdapter(context: Context) {
 
     fun search(keyword: String, page: Int): CatalogPage {
         require(keyword.isNotBlank() && keyword.length <= 80 && page in 1..100)
+        requireRuntime()
         val normalized = keyword.trim()
         val cursor = synchronized(cursorLock) {
             if (page == 1) {
@@ -82,6 +102,7 @@ internal class OpenHongguoAdapter(context: Context) {
     /** Fetch every playable episode in order. Cursor changes are checked to avoid a server loop. */
     fun listPlayableEpisodes(seriesId: String): List<Pair<Int, String>> {
         require(seriesId.matches(Regex("[0-9]{6,30}")))
+        requireRuntime()
         val result = mutableListOf<Pair<Int, String>>()
         var cursor: String? = null
         val seenCursors = mutableSetOf<String>()
@@ -122,6 +143,7 @@ internal class OpenHongguoAdapter(context: Context) {
             seriesTitle.isNotBlank() && seriesTitle.length <= 200 &&
                 episodeNumber in 1..10000 && expectedEpisodeCount in 1..10000,
         )
+        requireRuntime()
         val target = normalizeTitle(seriesTitle)
         if (target.isBlank()) throw IOException("无法识别剧名，跳过 openhongguo 来源")
         val candidates = linkedMapOf<String, String>()
@@ -176,6 +198,7 @@ internal class OpenHongguoAdapter(context: Context) {
     /** Resolve the complete SDK media model without discarding HLS, DASH or the separate audio track. */
     fun resolveMedia(episodeId: String): OpenHongguoResolvedMedia {
         require(episodeId.matches(Regex("[0-9]{1,30}")))
+        requireRuntime()
         val result = try {
             runBlocking(Dispatchers.IO) { client.resolvePlayback(episodeId) }
         } catch (failure: Exception) {

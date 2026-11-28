@@ -248,7 +248,7 @@ internal fun openStream(
     metadataAhead: List<String> = emptyList(),
     speculative: Boolean = false,
     sourceOrder: List<String> = listOf("openhongguo", "sdk", "app", "web"),
-    enabledSources: Set<String> = setOf("openhongguo", "app", "web"),
+    enabledSources: Set<String> = setOf("app", "web"),
     openHongguoLadder: (() -> StreamLadder)? = null,
     supportsTrack: (VideoTracks.Track?) -> Boolean,
 ): OpenedStream? {
@@ -325,9 +325,14 @@ internal fun openStream(
 
     fun openExternalSource(source: String): OpenedStream? = when (source) {
         "openhongguo" -> {
-            val provider = openHongguoLadder ?: throw IOException("openhongguo Android SDK 尚未初始化")
-            Log.i("HongguoTV", "Trying openhongguo Android SDK playback source")
-            prepare(provider.invoke())
+            val provider = openHongguoLadder
+            if (provider == null) {
+                Log.i("HongguoTV", "Skipping openhongguo playback source; no adapter supplied")
+                null
+            } else {
+                Log.i("HongguoTV", "Trying openhongguo Android SDK playback source")
+                prepare(provider.invoke())
+            }
         }
         "sdk" -> throw IOException("SDK helper 尚未提供 Android TV 原生执行档；已安全跳过")
         "web" -> {

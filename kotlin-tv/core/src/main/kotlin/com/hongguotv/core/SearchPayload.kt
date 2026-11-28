@@ -157,7 +157,9 @@ object CatalogSearchMerge {
             }
         }
         val merged = (primary.items + supplemental.items)
-            .filter { it.id.matches(Regex("[0-9]{6,30}")) && it.title.isNotBlank() }
+            // Validate source-specific ID formats at each provider boundary. The official App
+            // accepts 1..30 digit IDs; the openhongguo adapter separately enforces its 6-digit IDs.
+            .filter { it.id.matches(Regex("[0-9]{1,30}")) && it.title.isNotBlank() }
             .distinctBy { it.source to it.id }
             .sortedWith(compareBy<Series> { score(it) }.thenBy { it.title })
         return CatalogPage(
