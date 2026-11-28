@@ -173,8 +173,8 @@ internal class OpenHongguoAdapter(context: Context) {
             .lowercase(Locale.ROOT)
             .filter { it.isLetterOrDigit() }
 
-    /** Resolve one episode through the SDK and expose only progressive HTTPS MP4-like streams. */
-    fun resolvePlayback(episodeId: String): StreamLadder {
+    /** Resolve the complete SDK media model without discarding HLS, DASH or the separate audio track. */
+    fun resolveMedia(episodeId: String): OpenHongguoResolvedMedia {
         require(episodeId.matches(Regex("[0-9]{1,30}")))
         val result = try {
             runBlocking(Dispatchers.IO) { client.resolvePlayback(episodeId) }
@@ -182,27 +182,62 @@ internal class OpenHongguoAdapter(context: Context) {
             throw IOException("openhongguo 取源暂不可用", failure)
         }
         val key = result.contentKey?.key?.let(::decodeContentKey)
-        val rows = result.playback.streams.mapNotNull { stream ->
-            if (stream.hls || stream.dash) return@mapNotNull null
-            // RemoteVideo currently understands fragmented MP4 CENC AES-CTR sample encryption only.
-            if (stream.protected && (key == null || stream.encryption.lowercase() != "cenc-aes-ctr")) return@mapNotNull null
+        val representations = result.playback.streams.mapNotNull { stream ->
             val url = safeHttps(stream.url)
             if (url.isBlank()) return@mapNotNull null
-            val quality = Regex("(\\d{3,4})").find(stream.definition)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            Rendition(
-                quality = quality,
-                codec = stream.codec.ifBlank { "h264" }.lowercase(),
+            val kind = when {
+                stream.hls -> OpenHongguoMediaKind.HLS
+                stream.dash -> OpenHongguoMediaKind.DASH
+                else -> OpenHongguoMediaKind.PROGRESSIVE
+            }
+            OpenHongguoRepresentation(
+                definition = stream.definition,
+                quality = Regex("(\\d{3,4})").find(stream.definition)?.groupValues?.get(1)?.toIntOrNull() ?: 0,
+                codec = stream.codec.ifBlank { "unknown" }.lowercase(),
                 width = stream.width.takeIf { it > 0 },
                 height = stream.height.takeIf { it > 0 },
+                bitrate = stream.bitrate,
+                size = stream.size,
                 url = url,
-                key = if (stream.protected) key else null,
                 backupUrl = safeHttps(stream.backupUrl).ifBlank { null },
-                source = "openhongguo",
+                kind = kind,
+                protected = stream.protected,
+                encryption = stream.encryption.lowercase(),
+                contentKey = if (stream.protected && stream.encryption.equals("cenc-aes-ctr", true)) key?.clone() else null,
             )
         }
-        if (rows.isEmpty()) throw IOException(
-            result.contentKeyError?.message ?: "openhongguo 未返回可用的渐进式视频档位",
+        if (representations.isEmpty()) {
+            throw IOException(result.contentKeyError?.message ?: "openhongguo 没有可用的媒体 URL")
+        }
+        return OpenHongguoResolvedMedia(
+            episodeId = result.playback.episodeId,
+            expiresAt = result.playback.expiresAt,
+            durationSeconds = result.playback.durationSeconds,
+            audioUrl = safeHttps(result.playback.audioUrl),
+            representations = representations,
+            contentKeyError = result.contentKeyError?.message.orEmpty(),
         )
+    }
+
+    /**
+     * The current RemoteVideo playback reader accepts progressive MP4 streams only.
+     * Keep that boundary explicit; HLS/DASH metadata remains available to the download pipeline.
+     */
+    fun resolvePlayback(episodeId: String): StreamLadder {
+        val media = resolveMedia(episodeId)
+        val rows = media.representations.mapNotNull { it.toProgressiveRendition() }
+        if (rows.isEmpty()) {
+            val formats = media.representations.map { it.kind }.distinct().joinToString("／") {
+                when (it) {
+                    OpenHongguoMediaKind.HLS -> "HLS"
+                    OpenHongguoMediaKind.DASH -> "DASH"
+                    OpenHongguoMediaKind.PROGRESSIVE -> "受保护或不兼容的 MP4"
+                }
+            }
+            throw IOException(
+                media.contentKeyError.ifBlank { "openhongguo 仅返回 $formats；当前播放器不接受这类串流" },
+            )
+        }
         return StreamLadder(rows)
     }
 
