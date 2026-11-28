@@ -39,7 +39,7 @@ internal class TvDownloadLegacyForegroundService : Service() {
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {
-        manager?.suspendForSystemStop()
+        manager?.suspendForManualRecovery()
         stopSelf(startId)
     }
 

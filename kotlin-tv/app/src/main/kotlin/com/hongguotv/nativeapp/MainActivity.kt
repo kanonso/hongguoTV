@@ -2765,6 +2765,7 @@ class MainActivity : Activity() {
                     TvDownloadStatus.PENDING -> "等待中"
                     TvDownloadStatus.DOWNLOADING -> "下载中"
                     TvDownloadStatus.PAUSED -> "已暂停"
+                    TvDownloadStatus.INTERRUPTED -> "已中斷，需要手動继续"
                     TvDownloadStatus.COMPLETED -> "已完成"
                     TvDownloadStatus.FAILED -> "失败"
                     TvDownloadStatus.CANCELLED -> "已取消"
@@ -2798,7 +2799,7 @@ class MainActivity : Activity() {
                         action("暂停", "download-action:${task.id}:pause") { downloadManager.pause(task.id) }
                         action("取消", "download-action:${task.id}:cancel") { downloadManager.cancel(task.id) }
                     }
-                    TvDownloadStatus.PAUSED, TvDownloadStatus.FAILED -> {
+                    TvDownloadStatus.INTERRUPTED, TvDownloadStatus.PAUSED, TvDownloadStatus.FAILED -> {
                         action("继续／重试", "download-action:${task.id}:resume") { downloadManager.resume(task.id) }
                         action("取消", "download-action:${task.id}:cancel") { downloadManager.cancel(task.id) }
                     }

@@ -15,7 +15,12 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 
-internal enum class TvDownloadStatus { PENDING, DOWNLOADING, PAUSED, COMPLETED, FAILED, CANCELLED }
+internal enum class TvDownloadStatus { PENDING, DOWNLOADING, INTERRUPTED, PAUSED, COMPLETED, FAILED, CANCELLED }
+
+internal fun restoredDownloadStatus(status: TvDownloadStatus, executionSessionWasActive: Boolean): TvDownloadStatus =
+    if (status == TvDownloadStatus.DOWNLOADING ||
+        (executionSessionWasActive && status == TvDownloadStatus.PENDING)
+    ) TvDownloadStatus.INTERRUPTED else status
 
 internal data class TvDownloadTask(
     val id: String,
@@ -61,8 +66,10 @@ internal class TvDownloadManager(
     private val listeners = CopyOnWriteArrayList<(List<TvDownloadTask>) -> Unit>()
     private var draining = false
     private var executionAllowed = false
+    private var executionSessionActive = preferences.getBoolean("execution_active", false)
 
     init {
+        val interruptedSession = executionSessionActive
         val array = runCatching { JSONArray(preferences.getString("tasks", "[]")) }.getOrNull() ?: JSONArray()
         for (i in 0 until array.length()) {
             val row = array.optJSONObject(i) ?: continue
@@ -70,16 +77,17 @@ internal class TvDownloadManager(
             if (restored.status == TvDownloadStatus.CANCELLED && restored.mediaFormat == "hls") {
                 runCatching { hlsStore.remove(restored.id) }
             }
-            tasks[restored.id] = if (restored.status == TvDownloadStatus.DOWNLOADING)
-                restored.copy(
-                    status = TvDownloadStatus.PENDING,
-                    bytes = if (restored.mediaFormat == "hls") hlsStore.downloadedBytes(restored.id)
-                        else File(restored.filePath + ".part").takeIf(File::exists)?.length() ?: 0,
-                )
-            else restored
+            val recoveredStatus = restoredDownloadStatus(restored.status, interruptedSession)
+            val recoveredBytes = when {
+                restored.mediaFormat == "hls" -> hlsStore.downloadedBytes(restored.id)
+                else -> File(restored.filePath + ".part").takeIf(File::exists)?.length() ?: restored.bytes
+            }
+            tasks[restored.id] = restored.copy(status = recoveredStatus, bytes = recoveredBytes)
         }
+        // A fresh JobService start can re-arm INTERRUPTED items. A plain Activity launch cannot;
+        // this prevents Android Task Manager's Stop action from silently restarting the queue.
+        executionSessionActive = false
         persistLocked()
-        // Construction restores state only. The OS job/service starts network work explicitly.
     }
 
     fun snapshot(): List<TvDownloadTask> = synchronized(lock) { tasks.values.toList() }
@@ -154,7 +162,7 @@ internal class TvDownloadManager(
     fun resume(id: String) {
         synchronized(lock) {
             val task = tasks[id] ?: return
-            if (task.status !in setOf(TvDownloadStatus.PAUSED, TvDownloadStatus.FAILED)) return
+            if (task.status !in setOf(TvDownloadStatus.INTERRUPTED, TvDownloadStatus.PAUSED, TvDownloadStatus.FAILED)) return
             tasks[id] = task.copy(status = TvDownloadStatus.PENDING, error = "")
             persistLocked()
         }
@@ -167,9 +175,38 @@ internal class TvDownloadManager(
         if (alreadyExecuting) drain() else requestExecution()
     }
 
+    /** Called only by a JobService/foreground-service restart initiated by the OS scheduler. */
     fun resumePending() {
-        synchronized(lock) { executionAllowed = true }
+        synchronized(lock) {
+            tasks.entries.toList().forEach { (id, task) ->
+                if (task.status == TvDownloadStatus.INTERRUPTED) {
+                    tasks[id] = task.copy(status = TvDownloadStatus.PENDING, error = "")
+                }
+            }
+            executionAllowed = true
+            executionSessionActive = true
+            persistLocked()
+        }
         drain()
+    }
+
+    /** The OS explicitly stopped this transfer; retain partial data but don't auto-restart it. */
+    fun suspendForManualRecovery() {
+        synchronized(lock) {
+            executionAllowed = false
+            tasks.entries.toList().forEach { (id, task) ->
+                if (task.status in setOf(TvDownloadStatus.PENDING, TvDownloadStatus.DOWNLOADING)) {
+                    val bytes = if (task.mediaFormat == "hls") hlsStore.downloadedBytes(id)
+                        else File(task.filePath + ".part").takeIf(File::exists)?.length() ?: task.bytes
+                    tasks[id] = task.copy(status = TvDownloadStatus.INTERRUPTED, bytes = bytes)
+                }
+            }
+            activeVideos.values.toList().forEach { it.close() }
+            activeHlsDownloaders.values.toList().forEach { it.cancel() }
+            executionSessionActive = false
+            persistLocked()
+        }
+        publish()
     }
 
     fun suspendForSystemStop() {
@@ -257,7 +294,11 @@ internal class TvDownloadManager(
                     val continueQueue = synchronized(lock) {
                         draining = false
                         val pending = tasks.values.any { it.status == TvDownloadStatus.PENDING }
-                        if (!pending) executionAllowed = false
+                        if (!pending) {
+                            executionAllowed = false
+                            executionSessionActive = false
+                            persistLocked()
+                        }
                         pending && executionAllowed
                     }
                     if (continueQueue) drain()
@@ -492,7 +533,10 @@ internal class TvDownloadManager(
     private fun persistLocked() {
         val array = JSONArray()
         tasks.values.forEach { array.put(encode(it)) }
-        preferences.edit().putString("tasks", array.toString()).apply()
+        preferences.edit()
+            .putString("tasks", array.toString())
+            .putBoolean("execution_active", executionSessionActive)
+            .apply()
     }
 
     private fun encode(task: TvDownloadTask) = JSONObject().apply {

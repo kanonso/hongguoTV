@@ -60,6 +60,14 @@ internal class TvDownloadTransferJobService : JobService() {
     override fun onStopJob(params: JobParameters): Boolean {
         stopObserving?.invoke()
         stopObserving = null
+        if (Build.VERSION.SDK_INT >= 31 && params.stopReason == JobParameters.STOP_REASON_USER) {
+            manager?.suspendForManualRecovery()
+            finished = true
+            currentParams = null
+            manager = null
+            DownloadTransferScheduler.jobStopped(rescheduled = false)
+            return false
+        }
         manager?.suspendForSystemStop()
         val reschedule = manager?.hasRunnableTasks() == true
         finished = true
