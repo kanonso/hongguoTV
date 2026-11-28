@@ -194,21 +194,31 @@ class Library(context: Context) {
 
     fun favorite(id: String) = state().favorite(id)
 
+    fun favorite(series: Series) = state().favorite(series)
+
     fun later() = state().later()
 
     fun queued(id: String) = state().queued(id)
+
+    fun queued(series: Series) = state().queued(series)
 
     fun history(): List<WatchProgress> = state().history()
 
     fun progress(id: String): WatchProgress? = state().progress(id)
 
+    fun progress(series: Series): WatchProgress? = state().progress(series)
+
     fun searches() = state().searches()
 
     fun watched(id: String) = state().watched(id)
 
+    fun watched(series: Series) = state().watched(series)
+
     fun hidden() = state().hidden()
 
     fun favoriteUpdate(id: String) = state().favoriteUpdate(id)
+
+    fun favoriteUpdate(series: Series) = state().favoriteUpdate(series)
 
     fun updatedFavorites() = state().updatedFavorites()
 
@@ -224,6 +234,10 @@ class Library(context: Context) {
 
     fun save(progress: WatchProgress) {
         if (state().save(progress)) persist("progress")
+    }
+
+    fun setWatched(series: Series, value: Boolean) {
+        if (state().setWatched(series, value)) persist("watched")
     }
 
     fun setWatched(id: String, value: Boolean) {
@@ -250,6 +264,11 @@ class Library(context: Context) {
         persist("searches")
     }
 
+    fun removeHistory(series: Series) {
+        state().removeHistory(series)
+        persist("progress", "watched")
+    }
+
     fun removeHistory(id: String) {
         state().removeHistory(id)
         persist("progress", "watched")
@@ -258,6 +277,10 @@ class Library(context: Context) {
     fun clearHistory() {
         state().clearHistory()
         persist("progress", "watched")
+    }
+
+    fun observeFavorite(series: Series, count: Int, now: Long, acknowledge: Boolean = false) {
+        if (state().observeFavorite(series, count, now, acknowledge)) persist("favoriteUpdates")
     }
 
     fun observeFavorite(id: String, count: Int, now: Long, acknowledge: Boolean = false) {
