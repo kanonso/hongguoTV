@@ -277,3 +277,11 @@ internal class HlsOfflineStore(context: Context) {
         }
     }
 }
+
+/** Stable task marker paths: retries must not append duplicate media extensions. */
+internal fun hlsMarkerPath(path: String): String =
+    path.removeSuffix(".m3u8").removeSuffix(".mp4") + ".m3u8"
+
+/** A progressive download always publishes an MP4 target, even after an HLS retry. */
+internal fun progressiveMediaPath(path: String): String =
+    path.removeSuffix(".m3u8").removeSuffix(".mp4") + ".mp4"

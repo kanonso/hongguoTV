@@ -67,6 +67,9 @@ internal class TvDownloadManager(
         for (i in 0 until array.length()) {
             val row = array.optJSONObject(i) ?: continue
             val restored = decode(row) ?: continue
+            if (restored.status == TvDownloadStatus.CANCELLED && restored.mediaFormat == "hls") {
+                runCatching { hlsStore.remove(restored.id) }
+            }
             tasks[restored.id] = if (restored.status == TvDownloadStatus.DOWNLOADING)
                 restored.copy(
                     status = TvDownloadStatus.PENDING,
@@ -204,8 +207,12 @@ internal class TvDownloadManager(
         synchronized(lock) {
             val task = tasks[id] ?: return
             if (task.status == TvDownloadStatus.DOWNLOADING) return
-            if (deleteFile) {
-                if (task.mediaFormat == "hls") hlsStore.remove(id) else File(task.filePath).delete()
+            if (task.mediaFormat == "hls") {
+                // HLS is cache-backed rather than a standalone file; removing its task makes
+                // the task-scoped offline cache unreachable, so always remove it.
+                hlsStore.remove(id)
+            } else if (deleteFile) {
+                File(task.filePath).delete()
             }
             File(task.filePath + ".part").delete()
             tasks.remove(id)
@@ -265,8 +272,10 @@ internal class TvDownloadManager(
                 downloadHls(task, hlsPlan)
                 return
             }
+            if (task.mediaFormat == "hls") hlsStore.remove(id)
+            val progressivePath = progressiveMediaPath(task.filePath)
             opened = open(task.episodeId, task.seriesTitle, task.episodeNumber, task.episodeCount, task.source, task.maxQuality)
-            update(id) { it.copy(mediaFormat = "progressive", mediaUri = "") }
+            update(id) { it.copy(filePath = progressivePath, mediaFormat = "progressive", mediaUri = "") }
             val video = opened.video
             synchronized(lock) {
                 if (tasks[id]?.status != TvDownloadStatus.DOWNLOADING) throw IOException("下载已暂停或取消")
@@ -274,8 +283,8 @@ internal class TvDownloadManager(
             }
             val total = video.total
             if (total <= 0L || total > MAX_FILE_BYTES) throw IOException("文件大小无效或超过 2GB 下载上限")
-            val part = File(task.filePath + ".part")
-            val target = File(task.filePath)
+            val part = File(progressivePath + ".part")
+            val target = File(progressivePath)
             part.parentFile?.mkdirs()
             var offset = part.length()
             if (offset > total) { part.delete(); offset = 0 }
@@ -400,7 +409,7 @@ internal class TvDownloadManager(
                     }
                     activeHlsDownloaders[task.id] = currentDownloader
                     tasks[task.id] = task.copy(
-                        filePath = task.filePath.removeSuffix(".mp4") + ".m3u8",
+                        filePath = hlsMarkerPath(task.filePath),
                         mediaFormat = "hls",
                         mediaUri = offlineUri,
                         total = plan.estimatedSize.coerceAtLeast(0L),
@@ -512,7 +521,8 @@ internal class TvDownloadManager(
         return when {
             message.contains("超时") -> "网络请求超时"
             message.contains("HTTP") -> message.take(80)
-            message.contains("可播放") -> message.take(80)
+            message.contains("可播放") || message.contains("仅返回") || message.contains("HLS") || message.contains("DASH") ->
+                message.take(120)
             else -> "下载失败，请重试"
         }
     }

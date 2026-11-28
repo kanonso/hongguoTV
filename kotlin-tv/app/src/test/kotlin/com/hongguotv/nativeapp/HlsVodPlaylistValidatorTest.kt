@@ -7,6 +7,14 @@ import org.junit.Test
 
 class HlsVodPlaylistValidatorTest {
     @Test
+    fun taskMarkerPathsRemainStableAcrossRetriesAndFormatChanges() {
+        assertEquals("/downloads/series_ep1.m3u8", hlsMarkerPath("/downloads/series_ep1.mp4"))
+        assertEquals("/downloads/series_ep1.m3u8", hlsMarkerPath("/downloads/series_ep1.m3u8"))
+        assertEquals("/downloads/series_ep1.mp4", progressiveMediaPath("/downloads/series_ep1.m3u8"))
+        assertEquals("/downloads/series_ep1.mp4", progressiveMediaPath("/downloads/series_ep1.mp4"))
+    }
+
+    @Test
     fun validatesVodPlaylistAndAes128KeyUris() {
         val root = "https://media.invalid/episode/index.m3u8"
         val stats = HlsVodPlaylistValidator.validate(root) {
