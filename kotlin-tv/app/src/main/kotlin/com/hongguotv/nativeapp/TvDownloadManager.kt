@@ -5,6 +5,7 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileInputStream
 import java.io.IOException
 import java.io.RandomAccessFile
 import java.security.MessageDigest
@@ -185,7 +186,23 @@ internal class TvDownloadManager(
             val prefix = video.read(0, prefixLength)
             val fingerprint = sha256(prefix)
             val saved = synchronized(lock) { tasks[id]?.fingerprint.orEmpty() }
-            if (offset > 0 && (saved.isBlank() || saved != fingerprint || synchronized(lock) { tasks[id]?.total } != total)) {
+            val localPrefix = if (offset >= prefixLength) {
+                runCatching {
+                    FileInputStream(part).use { input ->
+                        val buffer = ByteArray(prefixLength)
+                        var count = 0
+                        while (count < buffer.size) {
+                            val read = input.read(buffer, count, buffer.size - count)
+                            if (read <= 0) break
+                            count += read
+                        }
+                        if (count == buffer.size) buffer else ByteArray(0)
+                    }
+                }.getOrDefault(ByteArray(0))
+            } else ByteArray(0)
+            val localMatches = localPrefix.size == prefixLength && sha256(localPrefix) == fingerprint
+            if (offset > 0 && (saved.isBlank() || saved != fingerprint || !localMatches ||
+                    synchronized(lock) { tasks[id]?.total } != total)) {
                 part.delete()
                 offset = 0
             }
