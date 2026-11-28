@@ -44,7 +44,9 @@ class MainActivity : Activity() {
     private val playbackSourceSettings by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { PlaybackSourceSettings(applicationContext) }
     private val downloadManagerDelegate = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         TvDownloadManager(this) { episodeId, source ->
-            val selectedSources = if (source == "openhongguo") setOf("openhongguo") else playbackSourceSettings.enabled()
+            val configuredSources = playbackSourceSettings.enabled()
+            val selectedSources = if (source == "openhongguo") configuredSources.intersect(setOf("openhongguo"))
+                else configuredSources - "openhongguo"
             openStream(
                 repository.http,
                 repository,
@@ -3455,7 +3457,9 @@ class MainActivity : Activity() {
                             recentPlaybackSources,
                             metadataAhead = data.episodes.drop(selectedIndex + 1).take(2),
                             sourceOrder = playbackSourceSettings.order(),
-                            enabledSources = if (data.series.source == "openhongguo") setOf("openhongguo") else playbackSourceSettings.enabled(),
+                            enabledSources = if (data.series.source == "openhongguo")
+                                playbackSourceSettings.enabled().intersect(setOf("openhongguo"))
+                            else playbackSourceSettings.enabled() - "openhongguo",
                             openHongguoLadder = { openHongguoAdapter.resolvePlayback(requestedId) },
                         ) {
                             it == null || CodecCapabilities.supports(it)
