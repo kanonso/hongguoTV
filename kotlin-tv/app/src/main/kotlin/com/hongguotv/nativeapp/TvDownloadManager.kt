@@ -27,6 +27,8 @@ internal data class TvDownloadTask(
     val maxQuality: Int = 1080,
     val source: String,
     val status: TvDownloadStatus,
+    val mediaFormat: String = "progressive",
+    val mediaUri: String = "",
     val bytes: Long = 0,
     val total: Long = 0,
     val filePath: String = "",
@@ -44,6 +46,8 @@ internal data class TvDownloadTask(
 internal class TvDownloadManager(
     context: Context,
     private val open: (episodeId: String, seriesTitle: String, episodeNumber: Int, episodeCount: Int, source: String, maxQuality: Int) -> OpenedStream,
+    private val openHls: (episodeId: String, seriesTitle: String, episodeNumber: Int, episodeCount: Int, source: String, maxQuality: Int) -> HlsDownloadPlan?,
+    private val hlsStore: HlsOfflineStore,
     private val requestExecution: () -> Unit,
 ) {
     private val app = context.applicationContext
@@ -52,6 +56,7 @@ internal class TvDownloadManager(
     private val executor = Executors.newSingleThreadExecutor()
     private val lock = Any()
     private val activeVideos = mutableMapOf<String, RemoteVideo>()
+    private val activeHlsDownloaders = mutableMapOf<String, androidx.media3.exoplayer.offline.Downloader>()
     private val tasks = linkedMapOf<String, TvDownloadTask>()
     private val listeners = CopyOnWriteArrayList<(List<TvDownloadTask>) -> Unit>()
     private var draining = false
@@ -63,7 +68,11 @@ internal class TvDownloadManager(
             val row = array.optJSONObject(i) ?: continue
             val restored = decode(row) ?: continue
             tasks[restored.id] = if (restored.status == TvDownloadStatus.DOWNLOADING)
-                restored.copy(status = TvDownloadStatus.PENDING, bytes = File(restored.filePath + ".part").takeIf(File::exists)?.length() ?: 0)
+                restored.copy(
+                    status = TvDownloadStatus.PENDING,
+                    bytes = if (restored.mediaFormat == "hls") hlsStore.downloadedBytes(restored.id)
+                        else File(restored.filePath + ".part").takeIf(File::exists)?.length() ?: 0,
+                )
             else restored
         }
         persistLocked()
@@ -133,6 +142,7 @@ internal class TvDownloadManager(
             if (task.status !in setOf(TvDownloadStatus.PENDING, TvDownloadStatus.DOWNLOADING)) return
             tasks[id] = task.copy(status = TvDownloadStatus.PAUSED)
             activeVideos[id]?.close()
+            activeHlsDownloaders[id]?.cancel()
             persistLocked()
         }
         publish()
@@ -159,11 +169,13 @@ internal class TvDownloadManager(
             executionAllowed = false
             tasks.entries.toList().forEach { (id, task) ->
                 if (task.status == TvDownloadStatus.DOWNLOADING) {
-                    val bytes = File(task.filePath + ".part").takeIf(File::exists)?.length() ?: task.bytes
+                    val bytes = if (task.mediaFormat == "hls") hlsStore.downloadedBytes(id)
+                        else File(task.filePath + ".part").takeIf(File::exists)?.length() ?: task.bytes
                     tasks[id] = task.copy(status = TvDownloadStatus.PENDING, bytes = bytes, error = "")
                 }
             }
             activeVideos.values.toList().forEach { it.close() }
+            activeHlsDownloaders.values.toList().forEach { it.cancel() }
             persistLocked()
         }
         publish()
@@ -177,18 +189,24 @@ internal class TvDownloadManager(
         synchronized(lock) {
             val task = tasks[id] ?: return
             activeVideos[id]?.close()
+            activeHlsDownloaders[id]?.cancel()
             tasks[id] = task.copy(status = TvDownloadStatus.CANCELLED, error = "已取消")
             File(task.filePath + ".part").delete()
             persistLocked()
         }
         publish()
+        if (synchronized(lock) { activeHlsDownloaders[id] == null && tasks[id]?.status == TvDownloadStatus.CANCELLED && tasks[id]?.mediaFormat == "hls" }) {
+            runCatching { executor.execute { hlsStore.remove(id) } }
+        }
     }
 
     fun remove(id: String, deleteFile: Boolean = false) {
         synchronized(lock) {
             val task = tasks[id] ?: return
             if (task.status == TvDownloadStatus.DOWNLOADING) return
-            if (deleteFile) File(task.filePath).delete()
+            if (deleteFile) {
+                if (task.mediaFormat == "hls") hlsStore.remove(id) else File(task.filePath).delete()
+            }
             File(task.filePath + ".part").delete()
             tasks.remove(id)
             persistLocked()
@@ -200,6 +218,7 @@ internal class TvDownloadManager(
         synchronized(lock) {
             executionAllowed = false
             activeVideos.values.toList().forEach { it.close() }
+            activeHlsDownloaders.values.toList().forEach { it.cancel() }
         }
         executor.shutdownNow()
     }
@@ -241,7 +260,51 @@ internal class TvDownloadManager(
         var opened: OpenedStream? = null
         try {
             val task = synchronized(lock) { tasks[id] } ?: return
+            val hlsPlan = openHls(task.episodeId, task.seriesTitle, task.episodeNumber, task.episodeCount, task.source, task.maxQuality)
+            if (hlsPlan != null) {
+                if (hlsPlan.estimatedSize > MAX_FILE_BYTES) throw IOException("HLS 檔案超過 2 GB 下載上限")
+                val offlineUri = hlsStore.offlineUri(hlsPlan.url)
+                val downloader = hlsStore.createDownloader(id, hlsPlan.url)
+                synchronized(lock) {
+                    if (tasks[id]?.status != TvDownloadStatus.DOWNLOADING) throw IOException("下载已暂停或取消")
+                    activeHlsDownloaders[id] = downloader
+                    tasks[id] = task.copy(
+                        filePath = task.filePath.removeSuffix(".mp4") + ".m3u8",
+                        mediaFormat = "hls",
+                        mediaUri = offlineUri,
+                        total = hlsPlan.estimatedSize.coerceAtLeast(0L),
+                    )
+                    persistLocked()
+                }
+                publish()
+                val maxBytes = java.util.concurrent.atomic.AtomicLong(0L)
+                val reportedBytes = java.util.concurrent.atomic.AtomicLong(0L)
+                val sizeExceeded = java.util.concurrent.atomic.AtomicBoolean(false)
+                downloader.download { contentLength, bytesDownloaded, percentDownloaded ->
+                    val currentBytes = maxBytes.updateAndGet { old -> maxOf(old, bytesDownloaded) }
+                    if (currentBytes > MAX_FILE_BYTES) {
+                        if (sizeExceeded.compareAndSet(false, true)) downloader.cancel()
+                    } else if (currentBytes - reportedBytes.get() >= PROGRESS_INTERVAL || percentDownloaded >= 100f) {
+                        reportedBytes.set(currentBytes)
+                        update(id) {
+                            it.copy(
+                                bytes = currentBytes,
+                                total = contentLength.takeIf { n -> n > 0L } ?: hlsPlan.estimatedSize.coerceAtLeast(0L),
+                            )
+                        }
+                    }
+                }
+                if (sizeExceeded.get()) throw IOException("HLS 檔案超過 2 GB 下載上限")
+                ensureRunning(id)
+                val downloaded = hlsStore.downloadedBytes(id)
+                update(id) {
+                    it.copy(status = TvDownloadStatus.COMPLETED, bytes = downloaded,
+                        total = downloaded.coerceAtLeast(it.total), error = "")
+                }
+                return
+            }
             opened = open(task.episodeId, task.seriesTitle, task.episodeNumber, task.episodeCount, task.source, task.maxQuality)
+            update(id) { it.copy(mediaFormat = "progressive", mediaUri = "") }
             val video = opened.video
             synchronized(lock) {
                 if (tasks[id]?.status != TvDownloadStatus.DOWNLOADING) throw IOException("下载已暂停或取消")
@@ -310,22 +373,25 @@ internal class TvDownloadManager(
             update(id) { it.copy(status = TvDownloadStatus.COMPLETED, bytes = total, total = total, error = "") }
         } catch (failure: Exception) {
             val current = synchronized(lock) { tasks[id] }
+            val partial = if (current?.mediaFormat == "hls") hlsStore.downloadedBytes(id)
+                else File(current?.filePath.orEmpty() + ".part").takeIf(File::exists)?.length() ?: current?.bytes ?: 0L
             when (current?.status) {
-                TvDownloadStatus.PAUSED, TvDownloadStatus.CANCELLED -> {
-                    update(id) { it.copy(bytes = File(it.filePath + ".part").takeIf(File::exists)?.length() ?: it.bytes) }
-                }
-                TvDownloadStatus.PENDING -> {
-                    update(id) { it.copy(bytes = File(it.filePath + ".part").takeIf(File::exists)?.length() ?: it.bytes) }
+                TvDownloadStatus.PAUSED, TvDownloadStatus.CANCELLED, TvDownloadStatus.PENDING -> {
+                    update(id) { it.copy(bytes = partial) }
                 }
                 else -> update(id) {
-                    it.copy(status = TvDownloadStatus.FAILED,
-                        bytes = File(it.filePath + ".part").takeIf(File::exists)?.length() ?: it.bytes,
-                        error = safeFailure(failure))
+                    it.copy(status = TvDownloadStatus.FAILED, bytes = partial, error = safeFailure(failure))
                 }
             }
         } finally {
             opened?.close()
-            synchronized(lock) { activeVideos.remove(id) }
+            synchronized(lock) {
+                activeVideos.remove(id)
+                activeHlsDownloaders.remove(id)
+            }
+            if (synchronized(lock) { tasks[id]?.status == TvDownloadStatus.CANCELLED }) {
+                runCatching { hlsStore.remove(id) }
+            }
         }
     }
 
@@ -359,6 +425,7 @@ internal class TvDownloadManager(
         put("episodeCount", task.episodeCount); put("maxQuality", task.maxQuality)
         put("source", task.source); put("status", task.status.name); put("bytes", task.bytes); put("total", task.total)
         put("filePath", task.filePath); put("error", task.error); put("fingerprint", task.fingerprint)
+        put("mediaFormat", task.mediaFormat); put("mediaUri", task.mediaUri)
     }
 
     private fun decode(row: JSONObject): TvDownloadTask? = runCatching {
@@ -373,6 +440,8 @@ internal class TvDownloadManager(
             bytes = row.optLong("bytes"), total = row.optLong("total"),
             filePath = row.optString("filePath"), error = row.optString("error"),
             fingerprint = row.optString("fingerprint"),
+            mediaFormat = row.optString("mediaFormat", "progressive"),
+            mediaUri = row.optString("mediaUri"),
         )
     }.getOrNull()
 

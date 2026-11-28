@@ -2681,12 +2681,32 @@ class MainActivity : Activity() {
         settingsRows.getOrNull(settingsPositions[settingsGroup].coerceAtMost(settingsRows.lastIndex))?.requestFocus()
     }
 
+    private fun playDownloadedTask(task: TvDownloadTask) {
+        if (task.mediaFormat == "hls") {
+            val source = runCatching {
+                TvDownloadRuntime.createHlsMediaSource(applicationContext, task.id, task.mediaUri)
+            }.getOrElse {
+                tvTools.info("本机播放", "HLS 离線快取無法讀取，請重新下載。", root)
+                return
+            }
+            playDownloadedMediaSource(task.seriesTitle) { player -> player.setMediaSource(source) }
+        } else {
+            playDownloadedFile(task.filePath, task.seriesTitle)
+        }
+    }
+
     private fun playDownloadedFile(path: String, title: String) {
         val file = java.io.File(path)
         if (!file.isFile || !file.canRead()) {
             tvTools.info("本机视频", "下载文件不存在或无法读取。", root)
             return
         }
+        playDownloadedMediaSource(title) { player ->
+            player.setMediaItem(androidx.media3.common.MediaItem.fromUri(android.net.Uri.fromFile(file)))
+        }
+    }
+
+    private fun playDownloadedMediaSource(title: String, setSource: (androidx.media3.exoplayer.ExoPlayer) -> Unit) {
         sleepTimer.cancel()
         homePlayback = true
         phonePlayback = false
@@ -2711,7 +2731,7 @@ class MainActivity : Activity() {
         root.addView(view, FrameLayout.LayoutParams(-1, -1))
         val instance = ensurePlayer()
         view.player = instance
-        instance.setMediaItem(androidx.media3.common.MediaItem.fromUri(android.net.Uri.fromFile(file)))
+        setSource(instance)
         instance.prepare()
         instance.playWhenReady = true
         playbackReady = true
@@ -2783,7 +2803,7 @@ class MainActivity : Activity() {
                         action("取消", "download-action:${task.id}:cancel") { downloadManager.cancel(task.id) }
                     }
                     TvDownloadStatus.COMPLETED -> {
-                        action("本机播放", "download-action:${task.id}:play") { playDownloadedFile(task.filePath, task.seriesTitle) }
+                        action("本机播放", "download-action:${task.id}:play") { playDownloadedTask(task) }
                         action("删除文件", "download-action:${task.id}:delete") { downloadManager.remove(task.id, deleteFile = true) }
                     }
                     TvDownloadStatus.CANCELLED -> action("移除记录", "download-action:${task.id}:remove") { downloadManager.remove(task.id) }

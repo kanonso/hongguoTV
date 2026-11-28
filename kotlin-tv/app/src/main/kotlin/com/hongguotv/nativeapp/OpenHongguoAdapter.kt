@@ -219,6 +219,21 @@ internal class OpenHongguoAdapter(context: Context) {
         )
     }
 
+    /** Resolve a complete, clear HLS representation for offline VOD download. */
+    fun resolveHls(episodeId: String, maxQuality: Int): HlsDownloadPlan? {
+        val media = resolveMedia(episodeId)
+        val candidates = media.representations.filter {
+            it.kind == OpenHongguoMediaKind.HLS && !it.protected && it.url.isNotBlank()
+        }
+        if (candidates.isEmpty()) return null
+        val eligible = candidates.filter { it.quality in 1..maxQuality.coerceAtLeast(1) }
+        val chosen = (eligible.ifEmpty { candidates }).maxWithOrNull(
+            compareBy<OpenHongguoRepresentation> { it.quality }.thenBy { it.bitrate },
+        ) ?: return null
+        if (chosen.size > 2L * 1024 * 1024 * 1024) throw IOException("HLS 檔案超過 2 GB 下載上限")
+        return HlsDownloadPlan(chosen.url, chosen.definition, chosen.quality, chosen.size)
+    }
+
     /**
      * The current RemoteVideo playback reader accepts progressive MP4 streams only.
      * Keep that boundary explicit; HLS/DASH metadata remains available to the download pipeline.

@@ -24,6 +24,15 @@ private class DownloadStreamOpener(context: Context) {
         CodecCapabilities.init(app)
     }
 
+    fun resolveHls(
+        episodeId: String,
+        seriesTitle: String,
+        episodeNumber: Int,
+        episodeCount: Int,
+        source: String,
+        maxQuality: Int,
+    ): HlsDownloadPlan? = if (source == "openhongguo") adapter.resolveHls(episodeId, maxQuality) else null
+
     fun open(
         episodeId: String,
         seriesTitle: String,
@@ -55,23 +64,36 @@ private class DownloadStreamOpener(context: Context) {
 /** A single process-wide queue using only application-context dependencies. */
 internal object TvDownloadRuntime {
     @Volatile private var instance: TvDownloadManager? = null
+    @Volatile private var hlsStore: HlsOfflineStore? = null
 
     fun get(context: Context, schedulePending: Boolean = false): TvDownloadManager {
         val app = context.applicationContext
         val value = instance ?: synchronized(this) {
             instance ?: run {
                 val opener = DownloadStreamOpener(app)
+                val offlineHls = HlsOfflineStore(app)
+                hlsStore = offlineHls
                 TvDownloadManager(
                     app,
                     open = { episodeId, title, number, count, source, quality ->
                         opener.open(episodeId, title, number, count, source, quality)
                     },
+                    openHls = { episodeId, title, number, count, source, quality ->
+                        opener.resolveHls(episodeId, title, number, count, source, quality)
+                    },
+                    hlsStore = offlineHls,
                     requestExecution = { DownloadTransferScheduler.request(app) },
                 ).also { instance = it }
             }
         }
         if (schedulePending && value.hasRunnableTasks()) DownloadTransferScheduler.request(app)
         return value
+    }
+
+    fun createHlsMediaSource(context: Context, taskId: String, offlineUri: String): androidx.media3.exoplayer.hls.HlsMediaSource {
+        get(context)
+        val store = hlsStore ?: throw IOException("HLS 离线快取尚未初始化")
+        return store.createMediaSource(taskId, offlineUri)
     }
 }
 
