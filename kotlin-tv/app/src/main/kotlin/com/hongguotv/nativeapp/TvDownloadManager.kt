@@ -47,6 +47,8 @@ internal data class TvDownloadTask(
     val progress: Int get() = if (total <= 0) 0 else ((bytes * 100L) / total).toInt().coerceIn(0, 100)
 }
 
+internal fun downloadGroupKey(task: TvDownloadTask): Pair<String, String> = task.source to task.seriesId
+
 /**
  * Android TV download queue. Downloads use the same verified, decoder-compatible, decrypted
  * RemoteVideo pipeline as playback; only complete app-authorized progressive streams are saved.

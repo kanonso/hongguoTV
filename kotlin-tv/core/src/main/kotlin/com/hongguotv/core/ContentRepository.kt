@@ -94,7 +94,7 @@ data class Series(
     }
 }
 
-data class Detail(val series: Series, val episodes: List<String>)
+data class Detail(val series: Series, val episodes: List<String>, val episodeSource: String = series.source)
 
 data class RankPosition(val rank: Int?, val heat: String, val metrics: String = "")
 
