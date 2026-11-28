@@ -290,6 +290,7 @@ constructor(
         identity: PlaybackDeviceSession.Profile,
         baseValues: Map<String, String>,
         originalBody: ByteArray?,
+        includeCookie: Boolean = true,
     ): Request.Builder {
         val now = clock()
         val profile = identity.values + mapOf(
@@ -308,7 +309,7 @@ constructor(
                     url, values, body, now = now, field21 = route.field21,
                 )
                 signedRequest(signed.url, signed).apply {
-                    if (identity.cookie.isNotBlank()) header("Cookie", identity.cookie)
+                    if (includeCookie && identity.cookie.isNotBlank()) header("Cookie", identity.cookie)
                 }
             }
             "player" -> {
@@ -322,7 +323,7 @@ constructor(
                     .header("Sdk-Version", "2")
                     .header("X-XS-From-Web", "0")
                     .apply { signingHeaders.forEach { (key, value) -> header(key, value) } }
-                    .apply { if (identity.cookie.isNotBlank()) header("Cookie", identity.cookie) }
+                    .apply { if (includeCookie && identity.cookie.isNotBlank()) header("Cookie", identity.cookie) }
             }
             "none" -> {
                 val query = Signer.encode(values + mapOf(
@@ -386,8 +387,13 @@ constructor(
     }
 
     /** 单集播放协议使用真实 Gorgon/Argus/Ladon；不能混用旧 Medusa 签名或账户 Cookie。 */
-    private fun singleVideoModel(id: String, identity: PlaybackDeviceSession.Profile,
-        trace: PlaybackRequestTrace, client: OkHttpClient): JSONObject {
+    private fun singleVideoModel(
+        id: String,
+        identity: PlaybackDeviceSession.Profile,
+        trace: PlaybackRequestTrace,
+        client: OkHttpClient,
+        strategyRoute: PlaybackStrategyRoute? = null,
+    ): JSONObject {
         val now = clock()
         val allowed = setOf("ac", "channel", "aid", "app_name", "version_code", "version_name",
             "device_platform", "os", "ssmix", "device_type", "device_brand", "language", "os_api",
@@ -395,15 +401,27 @@ constructor(
         val profile = identity.values.filterKeys { it in allowed } + mapOf(
             "version_code" to "73532", "version_name" to "7.3.5.32", "manifest_version_code" to "73532",
             "update_version_code" to "73532", "_rticket" to now.toString())
-        val query = Signer.encode(profile.toSortedMap())
         val payload = """{"biz_param":{"need_all_video_definition":true,"video_platform":3},"content_type":1,"video_id":"$id"}""".toByteArray()
-        val request = Request.Builder()
-            .url("https://${PlayRetryPlan.host(0)}/novel/player/video_model/v1/?$query")
-            .header("User-Agent", VendorConstants.VIDEO_UA.replace("/71332", "/73532"))
-            .header("Accept", "application/json").header("Sdk-Version", "2").header("X-XS-From-Web", "0")
-            .post(payload.toRequestBody("application/json; charset=utf-8".toMediaType()))
-        PlayerSignature().headers(query, payload, identity.values.getValue("device_id"), now)
-            .forEach { (key, value) -> request.header(key, value) }
+        val request = if (strategyRoute != null) {
+            strategyRequest(
+                strategyRoute,
+                "https://" + PlayRetryPlan.host(0) + "/novel/player/video_model/v1/",
+                identity,
+                profile,
+                payload,
+                includeCookie = false,
+            )
+        } else {
+            val query = Signer.encode(profile.toSortedMap())
+            val builder = Request.Builder()
+                .url("https://" + PlayRetryPlan.host(0) + "/novel/player/video_model/v1/?$query")
+                .header("User-Agent", VendorConstants.VIDEO_UA.replace("/71332", "/73532"))
+                .header("Accept", "application/json").header("Sdk-Version", "2").header("X-XS-From-Web", "0")
+                .post(payload.toRequestBody("application/json; charset=utf-8".toMediaType()))
+            PlayerSignature().headers(query, payload, identity.values.getValue("device_id"), now)
+                .forEach { (key, value) -> builder.header(key, value) }
+            builder
+        }
         // The caller may have a catalogue cookie jar; this protocol must remain anonymous.
         val anonymous = client.newBuilder().cookieJar(okhttp3.CookieJar.NO_COOKIES).build()
         val raw = fetchPlaybackModel(request, anonymous, trace, PlaybackRequestTrace.Stage.SINGLE)
