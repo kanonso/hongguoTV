@@ -30,9 +30,14 @@ internal class TvDownloadTransferJobService : JobService() {
         stopObserving = downloads.observe { tasks ->
             main.post {
                 if (finished || currentParams?.jobId != params.jobId) return@post
+                val active = tasks.filter { it.status == TvDownloadStatus.PENDING || it.status == TvDownloadStatus.DOWNLOADING }
+                val estimatedBytes = active.sumOf { maxOf(it.total, it.bytes).coerceAtLeast(0L) }
+                if (estimatedBytes > 0L && Build.VERSION.SDK_INT >= 34) {
+                    runCatching { updateEstimatedNetworkBytes(params, estimatedBytes, 0L) }
+                }
                 setNotification(params, TvDownloadNotification.NOTIFICATION_ID,
                     TvDownloadNotification.build(this, tasks), JOB_END_NOTIFICATION_POLICY_REMOVE)
-                if (tasks.none { it.status == TvDownloadStatus.PENDING || it.status == TvDownloadStatus.DOWNLOADING }) {
+                if (active.isEmpty()) {
                     finish(params)
                 }
             }
@@ -87,7 +92,7 @@ internal object TvDownloadNotification {
         val total = active.sumOf { it.total.coerceAtLeast(0) }
         val progress = if (total > 0) ((bytes * 100L) / total).toInt().coerceIn(0, 100) else 0
         val title = if (active.isEmpty()) "下載工作已完成" else "hongguoTV 正在下載"
-        val detail = if (active.isEmpty()) "所有下載任務已暫停或完成" else "佇列中 \${active.size} 個任務"
+        val detail = if (active.isEmpty()) "所有下載任務已暫停或完成" else "佇列中 ${active.size} 個任務"
         val open = Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val pending = android.app.PendingIntent.getActivity(context, NOTIFICATION_ID, open,
             android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE)
