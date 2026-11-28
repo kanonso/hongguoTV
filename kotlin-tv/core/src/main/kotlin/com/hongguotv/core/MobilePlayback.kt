@@ -189,6 +189,7 @@ internal object MobilePlayback {
         strategyRoute?.applyHeaders(requestHeaders)
         val request = Request.Builder().url(signed.url)
         requestHeaders.forEach { (key, value) -> request.header(key, value) }
+        signed.headers.forEach { (key, value) -> request.header(key, value) }
         RequestScope.ensureActive()
         request.post(bytes.toRequestBody("application/json; charset=utf-8".toMediaType()))
         val transport = http.newBuilder().cookieJar(CookieJar.NO_COOKIES).build()
