@@ -43,10 +43,10 @@ class MainActivity : Activity() {
     private val repository = ContentRepository(playbackSession = PlaybackDeviceSession.shared)
     private val playbackSourceSettings by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { PlaybackSourceSettings(applicationContext) }
     private val downloadManagerDelegate = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        TvDownloadManager(this) { episodeId, source ->
+        TvDownloadManager(this) { episodeId, seriesTitle, episodeNumber, source ->
             val configuredSources = playbackSourceSettings.enabled()
             val selectedSources = if (source == "openhongguo") configuredSources.intersect(setOf("openhongguo"))
-                else configuredSources - "openhongguo"
+                else configuredSources
             openStream(
                 repository.http,
                 repository,
@@ -56,7 +56,10 @@ class MainActivity : Activity() {
                 recentPlaybackSources,
                 sourceOrder = playbackSourceSettings.order(),
                 enabledSources = selectedSources,
-                openHongguoLadder = { openHongguoAdapter.resolvePlayback(episodeId) },
+                openHongguoLadder = {
+                    if (source == "openhongguo") openHongguoAdapter.resolvePlayback(episodeId)
+                    else openHongguoAdapter.resolvePlaybackBySeriesTitle(seriesTitle, episodeNumber)
+                },
             ) { track -> track == null || CodecCapabilities.supports(track) }
                 ?: throw java.io.IOException("没有电视可播放的清晰度")
         }
@@ -3467,7 +3470,10 @@ class MainActivity : Activity() {
                             enabledSources = if (data.series.source == "openhongguo")
                                 playbackSourceSettings.enabled().intersect(setOf("openhongguo"))
                             else playbackSourceSettings.enabled() - "openhongguo",
-                            openHongguoLadder = { openHongguoAdapter.resolvePlayback(requestedId) },
+                            openHongguoLadder = {
+                                if (data.series.source == "openhongguo") openHongguoAdapter.resolvePlayback(requestedId)
+                                else openHongguoAdapter.resolvePlaybackBySeriesTitle(data.series.title, selectedIndex + 1)
+                            },
                         ) {
                             it == null || CodecCapabilities.supports(it)
                         }
