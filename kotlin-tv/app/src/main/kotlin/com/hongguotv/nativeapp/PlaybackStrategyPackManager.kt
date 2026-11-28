@@ -308,7 +308,11 @@ internal class PlaybackStrategyPackManager(context: Context) {
             val values = safeValues(route.optJSONObject("values"), protectIdentity = true)
             val body = safeValues(route.optJSONObject("body"), protectIdentity = false)
             val headers = safeHeaders(route.optJSONObject("headers"))
-            val field21 = if (route.has("field21")) route.optInt("field21").coerceIn(0, 1_000_000) else null
+            val field21 = if (route.has("field21")) {
+                val value = route.optInt("field21", -1)
+                if (value !in 0..0xFFFF) throw IOException("策略 field21 超出 V5 签名器范围")
+                value
+            } else null
             PlaybackStrategyRoute(
                 id = id,
                 enabled = route.optBoolean("enabled", true),
