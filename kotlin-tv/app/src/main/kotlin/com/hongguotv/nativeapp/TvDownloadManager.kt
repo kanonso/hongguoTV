@@ -40,7 +40,7 @@ internal data class TvDownloadTask(
  */
 internal class TvDownloadManager(
     context: Context,
-    private val open: (episodeId: String, source: String) -> OpenedStream,
+    private val open: (episodeId: String, seriesTitle: String, episodeNumber: Int, source: String) -> OpenedStream,
 ) {
     private val app = context.applicationContext
     private val directory = File(app.filesDir, "downloads").apply { mkdirs() }
@@ -177,7 +177,7 @@ internal class TvDownloadManager(
         var opened: OpenedStream? = null
         try {
             val task = synchronized(lock) { tasks[id] } ?: return
-            opened = open(task.episodeId, task.source)
+            opened = open(task.episodeId, task.seriesTitle, task.episodeNumber, task.source)
             val video = opened.video
             synchronized(lock) {
                 if (tasks[id]?.status != TvDownloadStatus.DOWNLOADING) throw IOException("下载已暂停或取消")
