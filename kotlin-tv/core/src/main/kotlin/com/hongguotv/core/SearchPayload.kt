@@ -104,10 +104,15 @@ internal object SearchPayload {
         if (query.any { it in 'a'..'z' } && query.all { it in 'a'..'z' || it.isDigit() }) return items
         // Keep the requested title and its other seasons, not unrelated upstream recommendations.
         val seriesQuery = query.replace(Regex("第[零〇一二三四五六七八九十百千万两0-9]+[季部集]"), "")
-        return items.filter { item ->
+        val matching = items.filter { item ->
             val title = normalized(item.title)
             title.contains(query) || (seriesQuery.length >= 2 && title.contains(seriesQuery))
-        }.sortedBy { item ->
+        }
+        // Search APIs may match aliases, pinyin, abbreviations or category hints that are not
+        // present in the displayed title. Only narrow the page when we have a positive textual
+        // match; never turn an otherwise valid server page into "no results" by guessing.
+        val candidates = matching.ifEmpty { items }
+        return candidates.sortedBy { item ->
             val title = normalized(item.title)
             when { title == query -> 0; title.startsWith(query) -> 1; title.contains(query) -> 2; else -> 3 }
         }
