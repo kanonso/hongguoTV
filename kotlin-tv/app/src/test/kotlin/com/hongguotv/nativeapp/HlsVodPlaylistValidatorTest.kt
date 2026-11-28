@@ -69,6 +69,20 @@ seg.ts
     }
 
     @Test
+    fun rejectsUnverifiedSessionKeys() {
+        assertThrows(java.io.IOException::class.java) {
+            HlsVodPlaylistValidator.validate("https://media.invalid/session-key.m3u8") {
+                """#EXTM3U
+#EXT-X-SESSION-KEY:METHOD=AES-128,URI="key.bin"
+#EXTINF:4,
+v0.ts
+#EXT-X-ENDLIST
+"""
+            }
+        }
+    }
+
+    @Test
     fun rejectsInsecureSegmentUrlsAndDynamicPlaylistVariables() {
         assertThrows(java.io.IOException::class.java) {
             HlsVodPlaylistValidator.validate("https://media.invalid/unsafe.m3u8") {

@@ -262,7 +262,10 @@ internal class TvDownloadManager(
             val task = synchronized(lock) { tasks[id] } ?: return
             val hlsPlan = openHls(task.episodeId, task.seriesTitle, task.episodeNumber, task.episodeCount, task.source, task.maxQuality)
             if (hlsPlan != null) {
-                if (hlsPlan.estimatedSize > MAX_FILE_BYTES) throw IOException("HLS 檔案超過 2 GB 下載上限")
+                if (hlsPlan.estimatedSize > MAX_FILE_BYTES) {
+                    hlsStore.remove(id)
+                    throw IOException("HLS 檔案超過 2 GB 下載上限")
+                }
                 val offlineUri = hlsStore.offlineUri(hlsPlan.url)
                 val downloader = hlsStore.createDownloader(id, hlsPlan.url)
                 synchronized(lock) {
@@ -294,12 +297,15 @@ internal class TvDownloadManager(
                         }
                     }
                 }
-                if (sizeExceeded.get()) throw IOException("HLS 檔案超過 2 GB 下載上限")
+                if (sizeExceeded.get()) {
+                    runCatching { hlsStore.remove(id) }
+                    throw IOException("HLS 檔案超過 2 GB 下載上限")
+                }
                 ensureRunning(id)
                 val downloaded = hlsStore.downloadedBytes(id)
                 update(id) {
                     it.copy(status = TvDownloadStatus.COMPLETED, bytes = downloaded,
-                        total = downloaded.coerceAtLeast(it.total), error = "")
+                        total = downloaded, error = "")
                 }
                 return
             }

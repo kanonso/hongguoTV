@@ -87,7 +87,10 @@ internal object HlsVodPlaylistValidator {
         if (lines.any { it.startsWith("#EXT-X-PART:") || it.startsWith("#EXT-X-SKIP:") }) {
             throw IOException("HLS 低延遲／增量播放清單尚未支援")
         }
-        lines.filter { it.startsWith("#EXT-X-KEY:") || it.startsWith("#EXT-X-SESSION-KEY:") }
+        if (lines.any { it.startsWith("#EXT-X-SESSION-KEY:") }) {
+            throw IOException("HLS session-level key 尚未驗證支援，拒絕下載")
+        }
+        lines.filter { it.startsWith("#EXT-X-KEY:") }
             .forEach { line ->
                 val method = encryptionMethod.find(line)?.groupValues?.get(1)
                     ?: throw IOException("HLS 加密方法欄位缺失")
@@ -119,8 +122,7 @@ internal object HlsVodPlaylistValidator {
                     if (state.segments > MAX_SEGMENTS) throw IOException("HLS 分段數量超過上限")
                 }
             }
-            if (line.startsWith("#EXT-X-KEY:") || line.startsWith("#EXT-X-MAP:") ||
-                line.startsWith("#EXT-X-SESSION-KEY:")) {
+            if (line.startsWith("#EXT-X-KEY:") || line.startsWith("#EXT-X-MAP:")) {
                 uriAttribute.find(line)?.groupValues?.get(1)?.let { resolveHttps(url, it) }
             }
         }
@@ -195,7 +197,9 @@ internal class HlsOfflineStore(context: Context) {
             .setUri(Uri.parse(offlineUri))
             .setMimeType(MimeTypes.APPLICATION_M3U8)
             .build()
-        return HlsMediaSource.Factory(dataSourceFactory(taskId)).createMediaSource(mediaItem)
+        // Offline playback must not fall through to a signed CDN URL after the URL expires.
+        // A cache miss should be visible as an offline-read error, never a silent network request.
+        return HlsMediaSource.Factory(dataSourceFactory(taskId, cacheOnly = true)).createMediaSource(mediaItem)
     }
 
     fun remove(taskId: String) {
@@ -209,7 +213,7 @@ internal class HlsOfflineStore(context: Context) {
             .sumOf { key -> cache.getCachedSpans(key).sumOf { span -> span.length.coerceAtLeast(0L) } }
     }
 
-    private fun dataSourceFactory(taskId: String): CacheDataSource.Factory {
+    private fun dataSourceFactory(taskId: String, cacheOnly: Boolean = false): CacheDataSource.Factory {
         val keys = CacheKeyFactory { spec: DataSpec ->
             val stableUri = spec.uri.buildUpon().clearQuery().fragment(null).build().toString()
             "$taskId|$stableUri"
@@ -222,7 +226,7 @@ internal class HlsOfflineStore(context: Context) {
             .setDefaultRequestProperties(mapOf("Referer" to "https://novel.snssdk.com/"))
         return CacheDataSource.Factory()
             .setCache(cache)
-            .setUpstreamDataSourceFactory(upstream)
+            .setUpstreamDataSourceFactory(if (cacheOnly) null else upstream)
             .setCacheKeyFactory(keys)
     }
 
@@ -235,6 +239,11 @@ internal class HlsOfflineStore(context: Context) {
             .header("Referer", "https://novel.snssdk.com/")
             .build()
         playlistClient.newCall(request).execute().use { response ->
+            val finalUrl = response.request.url
+            if (finalUrl.scheme != "https" || finalUrl.username.isNotEmpty() ||
+                finalUrl.password.isNotEmpty() || finalUrl.port != 443) {
+                throw IOException("HLS playlist redirected to an unsafe URL")
+            }
             if (response.code != 200) throw IOException("HLS playlist HTTP " + response.code)
             val body = response.body ?: throw IOException("HLS playlist response body is missing")
             if (body.contentLength() > 2L * 1024 * 1024) throw IOException("HLS playlist too large")
