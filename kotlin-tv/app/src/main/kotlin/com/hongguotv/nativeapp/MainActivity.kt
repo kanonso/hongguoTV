@@ -1081,9 +1081,9 @@ class MainActivity : Activity() {
     // 合并片单的卡片、预览与续播统一使用较新的观看进度。
     private fun collectionEpisodeTotal(series: Series): Int {
         val remote = isFavorites() || isHistory() || tab == 5
-        val cloud = if (tab == 5) cloudAccount.progress(series.id) else if (remote) mergedCloudProgress(series.id) else null
-        val local = if (tab != 5) library.progress(series.id) else null
-        val update = if (tab != 5) library.favoriteUpdate(series.id) else null
+        val cloud = if (series.source != "hongguo") null else if (tab == 5) cloudAccount.progress(series.id) else if (remote) mergedCloudProgress(series.id) else null
+        val local = if (tab != 5) library.progress(series) else null
+        val update = if (tab != 5) library.favoriteUpdate(series) else null
         return maxOf(
                 EpisodeSummary.total(series.badge),
                 EpisodeSummary.total(cloud?.series?.badge.orEmpty()),
@@ -1102,7 +1102,7 @@ class MainActivity : Activity() {
     private fun collectionEpisodeLabel(series: Series): String {
         val remote = isFavorites() || isHistory() || tab == 5
         val cloud = if (tab == 5) cloudAccount.progress(series.id) else if (remote) mergedCloudProgress(series.id) else null
-        val local = if (tab != 5) library.progress(series.id) else null
+        val local = if (tab != 5) library.progress(series) else null
         val update = if (tab != 5) library.favoriteUpdate(series.id) else null
         return EpisodeSummary.label(
             collectionEpisodeTotal(series),
@@ -1110,7 +1110,7 @@ class MainActivity : Activity() {
             account = cloud != null,
             ready = cloudAccount.historyReady,
             loading = cloudAccount.historyLoading,
-            markedWatched = cloud == null && library.watched(series.id),
+            markedWatched = cloud == null && library.watched(series),
             pending = tab == 5 && !reservationOnline,
             added = update?.added ?: 0,
         )
@@ -1123,15 +1123,15 @@ class MainActivity : Activity() {
             "hot" -> collectionReturn?.items.orEmpty().filterNot { it.id in library.hidden() }
             "later" -> library.later()
             "updates" ->
-                library.favorites().filter { (library.favoriteUpdate(it.id)?.added ?: 0) > 0 }
+                library.favorites().filter { (library.favoriteUpdate(it)?.added ?: 0) > 0 }
             "resume" ->
-                library.history().filterNot { library.watched(it.series.id) }.map { it.series }
+                library.history().filterNot { library.watched(it.series) }.map { it.series }
             else ->
                 when {
-                isFavorites() -> (library.favorites() + cloudAccount.favoriteState().rows.map { it.series }).distinctBy { it.id }
+                isFavorites() -> (library.favorites() + cloudAccount.favoriteState().rows.map { it.series }).distinctBy { it.libraryKey }
                 isHistory() -> (library.history().map { it.series to it.updatedAt } +
                     cloudAccount.historyRows().map { it.series to it.updatedAt })
-                    .sortedByDescending { it.second }.distinctBy { it.first.id }.map { it.first }
+                    .sortedByDescending { it.second }.distinctBy { it.first.libraryKey }.map { it.first }
                     tab == 5 ->
                         cloudAccount.reservationState(reservationOnline).rows.map { it.series }
                     else -> library.history().map { it.series }
@@ -1198,14 +1198,14 @@ class MainActivity : Activity() {
                     listOf(nav[8]),
                     { openDetail(it, resume = true, fromHome = true) },
                     { series, anchor ->
-                        if (cloudAccount.signedIn) accountFavoriteAction(series, anchor)
+                        if (series.source == "hongguo" && cloudAccount.signedIn) accountFavoriteAction(series, anchor)
                         else {
                             library.toggle(series)
                             homeFeed?.refreshAccountLabel()
                             Toast.makeText(this, if (library.favorite(series.id)) "已加入本机收藏" else "已取消本机收藏", Toast.LENGTH_SHORT).show()
                         }
                     },
-                    { id -> if (cloudAccount.signedIn) cloudAccount.favoriteActionLabel(id)
+                    { id -> if (cloudAccount.signedIn && catalog.firstOrNull { it.id == id }?.source != "openhongguo") cloudAccount.favoriteActionLabel(id)
                         else if (library.favorite(id)) "已收藏 · 本机" else "加入本机收藏" },
                     PublicFeedBackend(
                         library.maxQuality,
@@ -2081,11 +2081,11 @@ class MainActivity : Activity() {
             return mergedCloudProgress(series.id)
                 ?.let { "账号进度 · 第 ${it.episodeIndex+1} 集 · ${formatTime(it.position)}" }
                 .orEmpty()
-        val progress = library.progress(series.id)
+        val progress = library.progress(series)
         return listOf(
-                if (library.favorite(series.id)) "已在本机收藏" else "",
-                if (library.queued(series.id)) "稍后看" else "",
-                if (library.watched(series.id)) "整剧已看完"
+                if (library.favorite(series)) "已在本机收藏" else "",
+                if (library.queued(series)) "稍后看" else "",
+                if (library.watched(series)) "整剧已看完"
                 else
                     progress
                         ?.let { "上次第 ${it.episodeIndex+1} 集 · ${formatTime(it.position)}" }
@@ -2265,8 +2265,8 @@ class MainActivity : Activity() {
         val actions = mutableListOf<Pair<String, () -> Unit>>()
         actions +=
             (if (
-                library.progress(series.id) != null ||
-                    isHistory() && cloudAccount.progress(series.id) != null
+                library.progress(series) != null ||
+                    series.source == "hongguo" && isHistory() && cloudAccount.progress(series.id) != null
             )
                 "继续观看"
             else "直接播放") to
@@ -2275,14 +2275,19 @@ class MainActivity : Activity() {
                         series,
                         true,
                         cloudProgress =
-                            if (isHistory()) mergedCloudProgress(series.id) else null,
+                            if (series.source == "hongguo" && isHistory()) mergedCloudProgress(series.id) else null,
                     )
                 }
         actions += "查看剧集详情" to { openDetail(series) }
         actions +=
-            cloudAccount.favoriteActionLabel(series.id) to { accountFavoriteAction(series, anchor) }
+            (if (series.source == "hongguo" && cloudAccount.signedIn) cloudAccount.favoriteActionLabel(series.id) else if (library.favorite(series)) "取消本机收藏" else "加入本机收藏") to {
+                if (series.source == "hongguo" && cloudAccount.signedIn) accountFavoriteAction(series, anchor) else {
+                    val added = library.toggle(series)
+                    Toast.makeText(this, if (added) "已加入本机收藏" else "已取消本机收藏", Toast.LENGTH_SHORT).show()
+                }
+            }
         actions +=
-            (if (library.favorite(series.id)) "取消本机收藏" else "加入本机收藏") to
+            (if (library.favorite(series)) "取消本机收藏" else "加入本机收藏") to
                 {
                     val added = library.toggle(series)
                     Toast.makeText(this, if (added) "已加入本机收藏" else "已取消本机收藏", Toast.LENGTH_SHORT)
@@ -2294,7 +2299,7 @@ class MainActivity : Activity() {
                     if (added) favoriteMonitor.check()
                 }
         actions += "查看完整标题" to { tvTools.info("完整标题", series.title, anchor) }
-        if (isHistory() && library.progress(series.id) != null) actions += "管理本机观看记录" to { manageHistory(series, anchor) }
+        if (isHistory() && library.progress(series) != null) actions += "管理本机观看记录" to { manageHistory(series, anchor) }
         tvTools.choose(
             series.title,
             actions.map { it.first },
@@ -2304,9 +2309,9 @@ class MainActivity : Activity() {
         )
     }
 
-    private fun detailFavoriteLabel(id: String): String =
-        if (cloudAccount.signedIn) cloudAccount.favoriteActionLabel(id)
-        else if (library.favorite(id)) "取消本机收藏" else "加入本机收藏"
+    private fun detailFavoriteLabel(series: Series): String =
+        if (series.source == "hongguo" && cloudAccount.signedIn) cloudAccount.favoriteActionLabel(series.id)
+        else if (library.favorite(series)) "取消本机收藏" else "加入本机收藏"
 
     private fun accountFavoriteAction(series: Series, anchor: View?) {
         if (!cloudAccount.signedIn) {
@@ -2913,19 +2918,19 @@ class MainActivity : Activity() {
     private fun manageHistory(series: Series, anchor: View?) {
         tvTools.choose(
             series.title,
-            listOf("继续观看", if (library.watched(series.id)) "恢复未看状态" else "标记整剧已看", "删除这条记录"),
+            listOf("继续观看", if (library.watched(series)) "恢复未看状态" else "标记整剧已看", "删除这条记录"),
             anchor,
             { index ->
                 when (index) {
                     0 -> openDetail(series, true)
                     1 -> {
-                        library.setWatched(series.id, !library.watched(series.id))
+                        library.setWatched(series, !library.watched(series))
                         catalogFocus = series.id
                         showCatalog()
                     }
                     2 ->
                         tvTools.confirm("删除本机观看记录", "删除《${series.title}》的本机观看进度？收藏会保留。", anchor) {
-                            library.removeHistory(series.id)
+                            library.removeHistory(series)
                             showCatalog()
                         }
                 }
@@ -2953,7 +2958,7 @@ class MainActivity : Activity() {
         val accountScope = cloudAccount.historyScope
         detailCloudScope = accountScope
         detailCloudProgress =
-            cloudProgress ?: if (!resume || fromHome) cloudAccount.progress(series.id) else null
+            if (series.source == "hongguo") cloudProgress ?: if (!resume || fromHome) cloudAccount.progress(series.id) else null else null
         pendingDetail = series
         detailAutoplay = autoplay
         invalidatePage()
@@ -2975,7 +2980,7 @@ class MainActivity : Activity() {
             { result ->
                 detail = result
                 library.observeFavorite(
-                    series.id,
+                    series,
                     result.episodes.size,
                     System.currentTimeMillis(),
                     acknowledge = true,
@@ -3026,7 +3031,7 @@ class MainActivity : Activity() {
     private fun detailProgress(data: Detail, preferCloud: Boolean = false): WatchProgress? =
         ResumePlayback.progress(
             data,
-            library.progress(data.series.id),
+            library.progress(data.series),
             detailCloudProgress?.takeIf {
                 cloudAccount.signedIn && detailCloudScope == cloudAccount.historyScope
             },
@@ -3106,7 +3111,7 @@ class MainActivity : Activity() {
         val progress = detailProgress(data)
         val resumeIndex =
             progress?.let { data.episodes.indexOf(it.episodeId).takeIf { n -> n >= 0 } } ?: 0
-        val watched = library.watched(data.series.id)
+        val watched = library.watched(data.series)
         val continueTarget =
             ResumePlayback.target(
                 data.episodes,
@@ -3151,20 +3156,20 @@ class MainActivity : Activity() {
             showDownloadManager(play)
         }
         accountFavoriteButton =
-            addButton(secondary, detailFavoriteLabel(data.series.id)) {
-                if (cloudAccount.signedIn) {
+            addButton(secondary, detailFavoriteLabel(data.series)) {
+                if (data.series.source == "hongguo" && cloudAccount.signedIn) {
                     accountFavoriteAction(data.series, accountFavoriteButton)
                 } else {
                     favoriteMonitor.stop()
                     val saved = library.toggle(data.series)
                     if (saved)
                         library.observeFavorite(
-                            data.series.id,
+                            data.series,
                             data.episodes.size,
                             System.currentTimeMillis(),
                             acknowledge = true,
                         )
-                    accountFavoriteButton?.text = detailFavoriteLabel(data.series.id)
+                    accountFavoriteButton?.text = detailFavoriteLabel(data.series)
                 }
             }
         lateinit var synopsisButton: TextView
@@ -3334,7 +3339,7 @@ class MainActivity : Activity() {
         val reuse =
             screen == "player" && player != null && playerView != null && (!playError || recovering) && !recreateView
                 && ((playerView?.videoSurfaceView is TextureView) == VideoRotation.usesTexture(library.videoRotation))
-        library.setWatched(data.series.id, false)
+        library.setWatched(data.series, false)
         val selectedIndex = index.coerceIn(0, data.episodes.lastIndex)
         if (
             position == 0L &&
@@ -3965,7 +3970,7 @@ class MainActivity : Activity() {
                 System.currentTimeMillis(),
             )
         library.save(old)
-        cloudAccount.upload(
+        if (old.series.source == "hongguo") cloudAccount.upload(
             CloudProgress(
                 old.series,
                 old.episodeId,
@@ -5233,10 +5238,10 @@ class MainActivity : Activity() {
                     }
                 },
                 lastWatched =
-                    library.progress(data.series.id)?.let {
+                    library.progress(data.series)?.let {
                         data.episodes.indexOf(it.episodeId).takeIf { n -> n >= 0 }
                     },
-                lastCompleted = library.progress(data.series.id)?.completed == true,
+                lastCompleted = library.progress(data.series)?.completed == true,
             )
         episodePanel = next
         next.show(controls, anchor)
@@ -5273,7 +5278,7 @@ class MainActivity : Activity() {
                 System.currentTimeMillis(),
             )
         library.save(progress)
-        cloudAccount.upload(
+        if (progress.series.source == "hongguo") cloudAccount.upload(
             CloudProgress(
                 progress.series,
                 progress.episodeId,
