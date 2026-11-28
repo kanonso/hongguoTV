@@ -247,6 +247,7 @@ internal fun openStream(
     initialBytes: Int = 256 * 1024,
     metadataAhead: List<String> = emptyList(),
     speculative: Boolean = false,
+    openHongguoLadder: (() -> StreamLadder)? = null,
     supportsTrack: (VideoTracks.Track?) -> Boolean,
 ): OpenedStream? {
     fun prepare(ladder: StreamLadder): OpenedStream? {
@@ -273,6 +274,23 @@ internal fun openStream(
         }
         if (ladder.renditions.isNotEmpty()) throw NoPlayableQualityException()
         return null
+    }
+
+    // Priority 1: the official Apache-2.0 openhongguo Android SDK. First use can register
+    // its own anonymous device profile; speculative prefetch never creates that profile.
+    if (!speculative && openHongguoLadder != null) {
+        try {
+            val community = openHongguoLadder.invoke()
+            val opened = prepare(community)
+            if (opened != null) {
+                opened.rendition?.let { recentSources.remember(id, it, maxQuality) }
+                Log.i("HongguoTV", "Opened episode through openhongguo Android SDK")
+                return opened
+            }
+        } catch (problem: Exception) {
+            RequestScope.ensureActive()
+            Log.i("HongguoTV", "openhongguo source unavailable; continuing to official App playback")
+        }
     }
 
     var validation: RecentSourceValidation? = null
