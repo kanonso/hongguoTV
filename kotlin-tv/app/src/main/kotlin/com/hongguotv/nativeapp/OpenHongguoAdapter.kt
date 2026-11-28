@@ -231,7 +231,13 @@ internal class OpenHongguoAdapter(context: Context) {
             compareBy<OpenHongguoRepresentation> { it.quality }.thenBy { it.bitrate },
         ) ?: return null
         if (chosen.size > 2L * 1024 * 1024 * 1024) throw IOException("HLS 檔案超過 2 GB 下載上限")
-        return HlsDownloadPlan(chosen.url, chosen.definition, chosen.quality, chosen.size)
+        return HlsDownloadPlan(
+            url = chosen.url,
+            definition = chosen.definition,
+            quality = chosen.quality,
+            estimatedSize = chosen.size,
+            backupUrl = chosen.backupUrl,
+        )
     }
 
     /**

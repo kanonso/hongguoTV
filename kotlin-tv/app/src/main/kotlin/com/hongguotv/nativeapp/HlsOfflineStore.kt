@@ -30,6 +30,7 @@ internal data class HlsDownloadPlan(
     val definition: String,
     val quality: Int,
     val estimatedSize: Long,
+    val backupUrl: String? = null,
 )
 
 internal data class HlsVodPlaylistStats(

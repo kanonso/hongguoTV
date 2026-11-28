@@ -262,51 +262,7 @@ internal class TvDownloadManager(
             val task = synchronized(lock) { tasks[id] } ?: return
             val hlsPlan = openHls(task.episodeId, task.seriesTitle, task.episodeNumber, task.episodeCount, task.source, task.maxQuality)
             if (hlsPlan != null) {
-                if (hlsPlan.estimatedSize > MAX_FILE_BYTES) {
-                    hlsStore.remove(id)
-                    throw IOException("HLS 檔案超過 2 GB 下載上限")
-                }
-                val offlineUri = hlsStore.offlineUri(hlsPlan.url)
-                val downloader = hlsStore.createDownloader(id, hlsPlan.url)
-                synchronized(lock) {
-                    if (tasks[id]?.status != TvDownloadStatus.DOWNLOADING) throw IOException("下载已暂停或取消")
-                    activeHlsDownloaders[id] = downloader
-                    tasks[id] = task.copy(
-                        filePath = task.filePath.removeSuffix(".mp4") + ".m3u8",
-                        mediaFormat = "hls",
-                        mediaUri = offlineUri,
-                        total = hlsPlan.estimatedSize.coerceAtLeast(0L),
-                    )
-                    persistLocked()
-                }
-                publish()
-                val maxBytes = java.util.concurrent.atomic.AtomicLong(0L)
-                val reportedBytes = java.util.concurrent.atomic.AtomicLong(0L)
-                val sizeExceeded = java.util.concurrent.atomic.AtomicBoolean(false)
-                downloader.download { contentLength, bytesDownloaded, percentDownloaded ->
-                    val currentBytes = maxBytes.updateAndGet { old -> maxOf(old, bytesDownloaded) }
-                    if (currentBytes > MAX_FILE_BYTES) {
-                        if (sizeExceeded.compareAndSet(false, true)) downloader.cancel()
-                    } else if (currentBytes - reportedBytes.get() >= PROGRESS_INTERVAL || percentDownloaded >= 100f) {
-                        reportedBytes.set(currentBytes)
-                        update(id) {
-                            it.copy(
-                                bytes = currentBytes,
-                                total = contentLength.takeIf { n -> n > 0L } ?: hlsPlan.estimatedSize.coerceAtLeast(0L),
-                            )
-                        }
-                    }
-                }
-                if (sizeExceeded.get()) {
-                    runCatching { hlsStore.remove(id) }
-                    throw IOException("HLS 檔案超過 2 GB 下載上限")
-                }
-                ensureRunning(id)
-                val downloaded = hlsStore.downloadedBytes(id)
-                update(id) {
-                    it.copy(status = TvDownloadStatus.COMPLETED, bytes = downloaded,
-                        total = downloaded, error = "")
-                }
+                downloadHls(task, hlsPlan)
                 return
             }
             opened = open(task.episodeId, task.seriesTitle, task.episodeNumber, task.episodeCount, task.source, task.maxQuality)
@@ -399,6 +355,105 @@ internal class TvDownloadManager(
                 runCatching { hlsStore.remove(id) }
             }
         }
+    }
+
+    /**
+     * Downloads one HLS VOD representation. A failed primary CDN is retried once against the
+     * SDK-provided backup URL. Cache entries from the failed CDN are cleared before switching,
+     * so two different partial segment sets can never be mixed.
+     */
+    private fun downloadHls(task: TvDownloadTask, plan: HlsDownloadPlan) {
+        if (plan.estimatedSize > MAX_FILE_BYTES) {
+            hlsStore.remove(task.id)
+            throw IOException("HLS 檔案超過 2 GB 下載上限")
+        }
+        val urls = listOfNotNull(plan.url, plan.backupUrl)
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .distinct()
+            .let { candidates ->
+                val preferred = task.mediaUri
+                if (preferred.isBlank()) candidates
+                else candidates.sortedBy { url ->
+                    if (runCatching { hlsStore.offlineUri(url) }.getOrNull() == preferred) 0 else 1
+                }
+            }
+        if (urls.isEmpty()) throw IOException("HLS 沒有可用的媒體 URL")
+
+        var lastFailure: Exception? = null
+        urls.forEachIndexed { index, rawUrl ->
+            ensureRunning(task.id)
+            if (index > 0) {
+                // Do not combine cached segments from different CDNs.
+                hlsStore.remove(task.id)
+                update(task.id) { it.copy(bytes = 0L, total = plan.estimatedSize.coerceAtLeast(0L), error = "") }
+            }
+            var downloader: androidx.media3.exoplayer.offline.Downloader? = null
+            val sizeExceeded = java.util.concurrent.atomic.AtomicBoolean(false)
+            try {
+                val offlineUri = hlsStore.offlineUri(rawUrl)
+                downloader = hlsStore.createDownloader(task.id, rawUrl)
+                synchronized(lock) {
+                    if (tasks[task.id]?.status != TvDownloadStatus.DOWNLOADING) {
+                        throw IOException("下載已暫停或取消")
+                    }
+                    activeHlsDownloaders[task.id] = downloader
+                    tasks[task.id] = task.copy(
+                        filePath = task.filePath.removeSuffix(".mp4") + ".m3u8",
+                        mediaFormat = "hls",
+                        mediaUri = offlineUri,
+                        total = plan.estimatedSize.coerceAtLeast(0L),
+                    )
+                    persistLocked()
+                }
+                publish()
+                val maxBytes = java.util.concurrent.atomic.AtomicLong(0L)
+                val reportedBytes = java.util.concurrent.atomic.AtomicLong(0L)
+                downloader.download { contentLength, bytesDownloaded, percentDownloaded ->
+                    val currentBytes = maxBytes.updateAndGet { old -> maxOf(old, bytesDownloaded) }
+                    if (currentBytes > MAX_FILE_BYTES) {
+                        if (sizeExceeded.compareAndSet(false, true)) downloader.cancel()
+                    } else if (currentBytes - reportedBytes.get() >= PROGRESS_INTERVAL || percentDownloaded >= 100f) {
+                        reportedBytes.set(currentBytes)
+                        update(task.id) {
+                            it.copy(
+                                bytes = currentBytes,
+                                total = contentLength.takeIf { n -> n > 0L } ?: plan.estimatedSize.coerceAtLeast(0L),
+                            )
+                        }
+                    }
+                }
+                if (sizeExceeded.get()) {
+                    hlsStore.remove(task.id)
+                    throw IOException("HLS 檔案超過 2 GB 下載上限")
+                }
+                ensureRunning(task.id)
+                val downloaded = hlsStore.downloadedBytes(task.id)
+                update(task.id) {
+                    it.copy(status = TvDownloadStatus.COMPLETED, bytes = downloaded, total = downloaded, error = "")
+                }
+                return
+            } catch (failure: Exception) {
+                val currentStatus = synchronized(lock) { tasks[task.id]?.status }
+                synchronized(lock) {
+                    if (activeHlsDownloaders[task.id] === downloader) activeHlsDownloaders.remove(task.id)
+                }
+                if (sizeExceeded.get()) {
+                    runCatching { hlsStore.remove(task.id) }
+                    throw IOException("HLS 檔案超過 2 GB 下載上限")
+                }
+                if (currentStatus != TvDownloadStatus.DOWNLOADING || Thread.currentThread().isInterrupted) {
+                    throw failure
+                }
+                if (index == urls.lastIndex) throw failure
+                lastFailure = failure
+                runCatching { hlsStore.remove(task.id) }
+                update(task.id) {
+                    it.copy(bytes = 0L, total = plan.estimatedSize.coerceAtLeast(0L), error = "")
+                }
+            }
+        }
+        throw lastFailure ?: IOException("HLS 下載失敗")
     }
 
     private fun ensureRunning(id: String) {
