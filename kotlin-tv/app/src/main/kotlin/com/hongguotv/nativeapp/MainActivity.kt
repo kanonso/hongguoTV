@@ -2906,7 +2906,7 @@ class MainActivity : Activity() {
                 activeSeasonMerge = null
                 activeSeasonMergePoll?.let(main::removeCallbacks)
                 activeSeasonMergePoll = null
-                if (progressDialog.isShowing) progressDialog.dismiss()
+                progressDialog?.takeIf { it.isShowing }?.dismiss()
                 output.delete()
                 tvTools.info(
                     "合并失败",
