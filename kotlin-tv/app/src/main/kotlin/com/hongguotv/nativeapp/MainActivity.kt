@@ -3441,7 +3441,7 @@ class MainActivity : Activity() {
                             recentPlaybackSources,
                             metadataAhead = data.episodes.drop(selectedIndex + 1).take(2),
                             sourceOrder = playbackSourceSettings.order(),
-                            enabledSources = playbackSourceSettings.enabled(),
+                            enabledSources = if (data.series.source == "openhongguo") setOf("openhongguo") else playbackSourceSettings.enabled(),
                             openHongguoLadder = { openHongguoAdapter.resolvePlayback(requestedId) },
                         ) {
                             it == null || CodecCapabilities.supports(it)
