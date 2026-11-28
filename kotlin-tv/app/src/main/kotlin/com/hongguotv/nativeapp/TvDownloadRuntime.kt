@@ -100,6 +100,7 @@ internal object TvDownloadRuntime {
 }
 
 /** Prefer quota-exempt user-initiated transfer jobs; old Android TV uses a visible FGS fallback. */
+@UnstableApi
 internal object DownloadTransferScheduler {
     private const val JOB_ID = 0x48475456
     @Volatile private var uidtScheduled = false
