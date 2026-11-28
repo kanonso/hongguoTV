@@ -113,8 +113,15 @@ internal class OpenHongguoAdapter(context: Context) {
      * displayed series title, require exactly one normalized exact-title match, then map the
      * 1-based episode number from its own episode directory. Never reuse a Hongguo episode ID.
      */
-    fun resolvePlaybackBySeriesTitle(seriesTitle: String, episodeNumber: Int): StreamLadder {
-        require(seriesTitle.isNotBlank() && seriesTitle.length <= 200 && episodeNumber in 1..10000)
+    fun resolvePlaybackBySeriesTitle(
+        seriesTitle: String,
+        episodeNumber: Int,
+        expectedEpisodeCount: Int,
+    ): StreamLadder {
+        require(
+            seriesTitle.isNotBlank() && seriesTitle.length <= 200 &&
+                episodeNumber in 1..10000 && expectedEpisodeCount in 1..10000,
+        )
         val target = normalizeTitle(seriesTitle)
         if (target.isBlank()) throw IOException("无法识别剧名，跳过 openhongguo 来源")
         val candidates = linkedMapOf<String, String>()
@@ -137,8 +144,13 @@ internal class OpenHongguoAdapter(context: Context) {
         }
         if (candidates.isEmpty()) throw IOException("openhongguo 没有找到同名剧集，安全跳过该来源")
         val matches = candidates.keys.mapNotNull { seriesId ->
-            val episode = listPlayableEpisodes(seriesId).firstOrNull { it.first == episodeNumber }
-            episode?.let { seriesId to it.second }
+            val completeEpisodes = listPlayableEpisodes(seriesId)
+            // The host catalogue exposes IDs but not explicit episode labels. Only map by index
+            // when the SDK's playable list is complete and numbered exactly 1..N for the same count.
+            val completeOrderedDirectory = completeEpisodes.size == expectedEpisodeCount &&
+                completeEpisodes.withIndex().all { (index, episode) -> episode.first == index + 1 }
+            if (!completeOrderedDirectory) null
+            else completeEpisodes.getOrNull(episodeNumber - 1)?.let { seriesId to it.second }
         }
         if (matches.size != 1) {
             throw IOException(
