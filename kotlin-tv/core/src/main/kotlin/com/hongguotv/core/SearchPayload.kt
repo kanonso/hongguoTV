@@ -95,7 +95,21 @@ internal object SearchPayload {
 
     /** Merge independent App and website pages without losing seasons or source pagination. */
     fun merge(primary: List<Series>, supplemental: List<Series>, keyword: String): List<Series> =
-        prioritize((primary + supplemental).distinctBy { it.id }, keyword)
+        prioritize((primary + supplemental).distinctBy { it.source to it.id }, keyword)
+
+    /** Strict filtering for the public website, whose endpoint includes cross-category recommendations. */
+    fun filterTextMatches(items: List<Series>, keyword: String): List<Series> {
+        val query = normalized(keyword)
+        if (query.isEmpty()) return items
+        val seriesQuery = query.replace(Regex("第[零〇一二三四五六七八九十百千万两0-9]+[季部集]"), "")
+        return items.filter { item ->
+            val title = normalized(item.title)
+            title.contains(query) || (seriesQuery.length >= 2 && title.contains(seriesQuery))
+        }.sortedBy { item ->
+            val title = normalized(item.title)
+            when { title == query -> 0; title.startsWith(query) -> 1; title.contains(query) -> 2; else -> 3 }
+        }
+    }
 
     fun prioritize(items: List<Series>, keyword: String): List<Series> {
         val query = normalized(keyword)
