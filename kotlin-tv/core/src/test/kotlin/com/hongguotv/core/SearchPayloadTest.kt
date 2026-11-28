@@ -79,6 +79,62 @@ class SearchPayloadTest {
     }
 
 
+    @Test fun albumTypeSearchMapsTheAlbumIdAndItsOwnSeasonTitle() {
+        val album = JSONObject().put("content_type", 1003).put("album_info",
+            JSONObject().put("album_id_str", "770123456789").put("title", "测试作品第五季")
+                .put("episode_cnt", 48).put("cover", "https://example.test/cover.jpg"))
+        val row = JSONObject().put("video_data", JSONArray().put(album))
+        val result = SearchPayload.parse(body(JSONArray().put(row)).toString(), ContentType.COMIC, "测试作品第五季")
+        assertEquals("770123456789", result.items.single().id)
+        assertEquals("测试作品第五季", result.items.single().title)
+        assertEquals("全 48 集", result.items.single().badge)
+    }
+
+    @Test fun nonVideoBookTypesAreNotMappedToPlayableDramaRows() {
+        val row = JSONObject().put("video_data", JSONArray().put(
+            JSONObject().put("content_type", 9999).put("series_id", "770123456789").put("title", "非短剧内容")))
+        val result = SearchPayload.parse(body(JSONArray().put(row)).toString(), ContentType.COMIC, "非短剧内容")
+        assertTrue(result.items.isEmpty())
+    }
+
+    @Test fun appAndWebsiteSupplementResultsMergeWithoutDuplicateOrUnrelatedRows() {
+        val app = listOf(Series("1", "大佬，你该出手了第五季"), Series("2", "无关推荐"))
+        val website = listOf(
+            Series("1", "大佬，你该出手了第五季"),
+            Series("3", "大佬，你该出手了第四季"),
+            Series("4", "另一个无关推荐"),
+        )
+        val merged = SearchPayload.merge(app, website, "大佬，你该出手了第五季")
+        assertEquals(listOf("1", "3"), merged.map { it.id })
+        assertEquals(1, merged.count { it.id == "1" })
+    }
+
+    @Test fun repositorySearchQueriesAndMergesAppAndWebsiteOnTheSamePage() {
+        val requests = mutableListOf<String>()
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request()
+            requests += request.url.encodedPath
+            val response = when (request.url.encodedPath) {
+                "/reading/bookapi/search/tab/v" -> """
+                    {"code":0,"search_tabs":[{"tab_type":11,"has_more":false,"data":[
+                      {"video_data":[{"content_type":1004,"series_id":"700001","title":"大佬，你该出手了第五季","episode_cnt":48}]}
+                    ]}]}
+                "/api/search/result" -> """
+                    {"pageNum":1,"hasMore":false,"searchList":[
+                      {"video_data":{"series_id":"700001","series_title":"大佬，你该出手了第五季","genre":"203"}},
+                      {"video_data":{"series_id":"700002","series_title":"大佬，你该出手了第四季","genre":"203"}},
+                      {"video_data":{"series_id":"799999","series_title":"无关推荐","genre":"203"}}
+                    ]}
+                else -> error("Unexpected search endpoint: ${request.url.encodedPath}")
+            }
+            okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1)
+                .code(200).message("OK").body(response.trimIndent().toResponseBody()).build()
+        }.build()
+        val page = ContentRepository(http).search("大佬，你该出手了第五季", type = ContentType.SHORT)
+        assertEquals(listOf("700001", "700002"), page.items.map { it.id })
+        assertEquals(listOf("/reading/bookapi/search/tab/v", "/api/search/result"), requests)
+    }
+
     @Test fun pinyinSearchKeepsServerMatchesWithChineseTitles() {
         val items = listOf(Series("1", "重生之路"), Series("2", "重生归来"))
         assertEquals(items, SearchPayload.prioritize(items, "cs"))
