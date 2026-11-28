@@ -88,6 +88,7 @@ class MainActivity : Activity() {
         TvDownloadRuntime.get(applicationContext, schedulePending = true)
     }
     private var activeSeasonMerge: Transformer? = null
+    private var activeSeasonMergePoll: Runnable? = null
 
     private val openHongguoAdapter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         OpenHongguoAdapter(applicationContext)
@@ -2876,9 +2877,13 @@ class MainActivity : Activity() {
         val sequence = EditedMediaItemSequence.withAudioAndVideoFrom(editedItems)
         val composition = Composition.Builder(listOf(sequence)).build()
         lateinit var progressDialog: AlertDialog
+        lateinit var transformer: Transformer
         val listener = object : Transformer.Listener {
             override fun onCompleted(composition: Composition, result: ExportResult) {
+                if (activeSeasonMerge !== transformer) return
                 activeSeasonMerge = null
+                activeSeasonMergePoll?.let(main::removeCallbacks)
+                activeSeasonMergePoll = null
                 if (progressDialog.isShowing) progressDialog.dismiss()
                 Toast.makeText(this@MainActivity, "合并完成：${mergeable.size} 集", Toast.LENGTH_LONG).show()
                 runCatching {
@@ -2897,7 +2902,10 @@ class MainActivity : Activity() {
             }
 
             override fun onError(composition: Composition, result: ExportResult, exception: ExportException) {
+                if (activeSeasonMerge !== transformer) return
                 activeSeasonMerge = null
+                activeSeasonMergePoll?.let(main::removeCallbacks)
+                activeSeasonMergePoll = null
                 if (progressDialog.isShowing) progressDialog.dismiss()
                 output.delete()
                 tvTools.info(
@@ -2908,10 +2916,9 @@ class MainActivity : Activity() {
             }
         }
         try {
-            val transformer = Transformer.Builder(this)
+            transformer = Transformer.Builder(this).addListener(listener)
                 .setVideoMimeType(MimeTypes.VIDEO_H264)
                 .setAudioMimeType(MimeTypes.AUDIO_AAC)
-                .addListener(listener)
                 .build()
             activeSeasonMerge = transformer
             val omittedHls = completed.count { it.mediaFormat == "hls" }
@@ -2926,15 +2933,42 @@ class MainActivity : Activity() {
                 .create()
             progressDialog.setOnShowListener {
                 progressDialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
-                    transformer.cancel()
-                    progressDialog.setMessage("正在取消合并…")
-                    it.isEnabled = false
+                    if (activeSeasonMerge === transformer) {
+                        activeSeasonMerge = null
+                        activeSeasonMergePoll?.let(main::removeCallbacks)
+                        activeSeasonMergePoll = null
+                        transformer.cancel()
+                        transformer.removeAllListeners()
+                        output.delete()
+                        progressDialog.dismiss()
+                    }
                 }
             }
             progressDialog.show()
             transformer.start(composition, output.absolutePath)
+            val progressHolder = ProgressHolder()
+            val poll = object : Runnable {
+                override fun run() {
+                    if (activeSeasonMerge !== transformer || !progressDialog.isShowing) return
+                    val state = transformer.getProgress(progressHolder)
+                    if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
+                        progressDialog.setMessage(
+                            "合并中 ${progressHolder.progress}% · ${mergeable.size} 集\n" +
+                                "請保持應用在前景，低階裝置可能需要較長時間。",
+                        )
+                    }
+                    if (state != Transformer.PROGRESS_STATE_NOT_STARTED) main.postDelayed(this, 500)
+                }
+            }
+            activeSeasonMergePoll = poll
+            main.post(poll)
         } catch (failure: Exception) {
+            activeSeasonMerge?.takeIf { it === runCatching { transformer }.getOrNull() }?.let {
+                runCatching { it.cancel(); it.removeAllListeners() }
+            }
             activeSeasonMerge = null
+            activeSeasonMergePoll?.let(main::removeCallbacks)
+            activeSeasonMergePoll = null
             output.delete()
             if (::progressDialog.isInitialized && progressDialog.isShowing) progressDialog.dismiss()
             tvTools.info("无法开始合并", failure.message.orEmpty().take(180), root)
