@@ -58,8 +58,12 @@ data class BackupData(
 object LibraryBackup {
     const val MAX_BYTES = 2 * 1024 * 1024
     private val idPattern = Regex("[0-9]{1,30}")
+    private val libraryKeyPattern = Regex("(?:[a-z0-9_-]{1,32}:)?[0-9]{1,30}")
 
     private fun id(value: String) = value.also { require(idPattern.matches(it)) { "剧集标识无效" } }
+
+    private fun libraryKey(value: String) =
+        value.also { require(libraryKeyPattern.matches(it)) { "本机片库标识无效" } }
 
     private fun cleanCover(value: String): String =
         runCatching {
@@ -217,7 +221,7 @@ object LibraryBackup {
         }
         val watched = o.getJSONArray("watched")
         require(watched.length() <= 500)
-        val watchedIds = (0 until watched.length()).map { id(watched.getString(it)) }.toSet()
+        val watchedIds = (0 until watched.length()).map { libraryKey(watched.getString(it)) }.toSet()
         val searches =
             o.rows("searches", 20).map { row ->
                 RecentSearch(
