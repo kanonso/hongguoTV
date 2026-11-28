@@ -556,18 +556,42 @@ constructor(
         return CatalogPage(items, items.isNotEmpty() && page < info.totalPages, discovery = info)
     }
 
-    // 按内容类型执行关键词搜索；分页状态由对应的搜索实现维护。
+    // Query the App and public website independently on every page. App results alone
+    // are not considered complete: website indexing can expose seasons absent from the TV tab.
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(keyword.isNotBlank() && keyword.length <= 80 && page in 1..100)
-        // The website search does not constrain content type. Never use it for comics.
-        if (type == ContentType.COMIC) return appSearch(keyword, page, type)
+        var appPage: CatalogPage? = null
+        var appFailure: Exception? = null
+        var websitePage: CatalogPage? = null
+        var websiteFailure: Exception? = null
+
         try {
-            val result = appSearch(keyword, page, type)
-            if (result.items.isNotEmpty() || !result.hasMore) return result
-        } catch (e: Exception) {
-            if (e is SearchSessionExpiredException) throw e
-            /* Website fallback for short dramas only. */ }
-        return searchAll(keyword, page, type)
+            appPage = appSearch(keyword, page, type)
+        } catch (problem: Exception) {
+            if (problem is InterruptedException || Thread.currentThread().isInterrupted) throw problem
+            appFailure = problem
+        }
+        try {
+            websitePage = searchAll(keyword, page, type)
+        } catch (problem: Exception) {
+            if (problem is InterruptedException || Thread.currentThread().isInterrupted) throw problem
+            websiteFailure = problem
+        }
+
+        if (appPage == null && websitePage == null) {
+            val detail = listOfNotNull(appFailure?.message, websiteFailure?.message).distinct()
+                .joinToString("；").ifBlank { "搜索服务暂不可用" }
+            throw IOException("$detail，请稍后重试", appFailure ?: websiteFailure)
+        }
+        val merged = SearchPayload.merge(
+            appPage?.items.orEmpty(),
+            websitePage?.items.orEmpty(),
+            keyword,
+        )
+        return CatalogPage(
+            valid(merged),
+            appPage?.hasMore == true || websitePage?.hasMore == true,
+        )
     }
 
     /** Anonymous first-party website suggestions; pinyin matching is provided by the server. */
@@ -671,55 +695,13 @@ constructor(
                 values,
             )
         val data = JSONObject(text(signed.url, signed))
-        if (data.optInt("code", -1) != 0) throw IOException("搜索接口暂不可用")
-        val tabs =
-            data.optJSONArray("search_tabs")
-                ?: data.optJSONObject("data")?.optJSONArray("search_tabs")
-                ?: throw IOException("搜索格式异常")
-        val tab =
-            tabs.objects().firstOrNull { it.optInt("tab_type") == type.searchTab }
-                ?: throw IOException("${type.label}搜索暂不可用")
-        val list = mutableListOf<Series>()
-        for (cell in (tab.optJSONArray("data") ?: JSONArray()).objects()) {
-            val cells = mutableListOf(cell)
-            runCatching { JSONObject(cell.str("lynx_data")).optJSONArray("cell_data")?.objects() }
-                .getOrNull()
-                ?.let { cells.addAll(it) }
-            for (row in cells) {
-                val video = row.optJSONArray("video_data")?.objects()?.firstOrNull() ?: continue
-                val id =
-                    video.str("series_id").ifEmpty {
-                        row.str("book_id").ifEmpty { row.str("search_result_id") }
-                    }
-                val title =
-                    row.optJSONObject("search_high_light")
-                        ?.optJSONObject("title")
-                        ?.str("text")
-                        .orEmpty()
-                        .ifEmpty { video.str("title").ifEmpty { row.str("cell_name") } }
-                val count = video.optInt("episode_cnt")
-                list +=
-                    Series(
-                        id,
-                        title,
-                        cleanUrl(video.str("cover").ifEmpty { video.str("cover_url") }),
-                        video.str("video_desc"),
-                        if (count > 0) "全 $count 集" else video.str("rec_text"),
-                        video.str("sub_title"),
-                    )
-            }
-        }
+        val parsed = SearchPayload.parse(data.toString(), type, keyword)
         synchronized(searchCursors) {
             searchCursors[Triple(type, keyword, page)] =
-                SearchCursor(
-                    tab.str("search_id"),
-                    tab.str("passback"),
-                    tab.str("next_offset").toIntOrNull(),
-                    clock(),
-                )
+                SearchCursor(parsed.searchId, parsed.passback, parsed.nextOffset, clock())
             while (searchCursors.size > 100) searchCursors.remove(searchCursors.keys.first())
         }
-        return CatalogPage(valid(list), tab.optBoolean("has_more", false) && page < 100)
+        return CatalogPage(valid(parsed.items), parsed.hasMore && page < 100)
     }
 
     private val producerCredits = linkedMapOf<String, ProducerCredit>()
