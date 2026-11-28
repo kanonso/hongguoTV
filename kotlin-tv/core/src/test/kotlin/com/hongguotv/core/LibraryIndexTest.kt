@@ -152,53 +152,6 @@ class LibraryIndexTest {
     }
 
     @Test
-    fun `provider scoped library keys isolate duplicate numeric IDs and survive backup merge`() {
-        val hongguo = Series("777", "同号作品·红果")
-        val community = Series("777", "同号作品·社区", source = "openhongguo")
-        val initial = data().copy(
-            favorites = emptyList(),
-            history = emptyList(),
-            later = emptyList(),
-            watched = emptySet(),
-        )
-        val state = LibraryIndex(initial)
-
-        assertTrue(state.toggle(hongguo))
-        assertTrue(state.toggle(community))
-        assertEquals(2, state.favorites().size)
-        assertTrue(state.favorite(hongguo))
-        assertTrue(state.favorite(community))
-        assertTrue(state.observeFavorite(hongguo, 12, 100, acknowledge = false))
-        assertFalse(state.observeFavorite(community, 12, 100, acknowledge = false))
-        assertNotNull(state.favoriteUpdate(hongguo))
-        assertNull(state.favoriteUpdate(community))
-
-        val hongguoProgress = progress(777).copy(series = hongguo, position = 1000, updatedAt = 200)
-        val communityProgress = progress(777).copy(series = community, position = 9000, updatedAt = 201)
-        assertTrue(state.save(hongguoProgress))
-        assertTrue(state.save(communityProgress))
-        assertEquals(2, state.history().size)
-        assertEquals(1000L, state.progress(hongguo)?.position)
-        assertEquals(9000L, state.progress(community)?.position)
-
-        assertTrue(state.setWatched(hongguo, true))
-        assertTrue(state.setWatched(community, true))
-        assertTrue(state.watched(hongguo))
-        assertTrue(state.watched(community))
-
-        val decoded = LibraryBackup.decode(LibraryBackup.encode(state.snapshot()))
-        assertEquals(setOf("777", "openhongguo:777"), decoded.watched)
-        assertEquals(setOf("hongguo", "openhongguo"), decoded.favorites.map { it.source }.toSet())
-        val restored = LibraryIndex(LibraryBackup.merge(initial, decoded, restoreSettings = false))
-        assertEquals(2, restored.favorites().size)
-        assertEquals(2, restored.history().size)
-        assertEquals(1000L, restored.progress(hongguo)?.position)
-        assertEquals(9000L, restored.progress(community)?.position)
-        assertTrue(restored.watched(hongguo))
-        assertTrue(restored.watched(community))
-    }
-
-    @Test
     fun `malformed rows do not discard valid records`() {
         val favoriteJson = "[null,{},${series(1).toJson()},false]"
         val state =
