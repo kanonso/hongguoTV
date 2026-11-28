@@ -561,6 +561,9 @@ constructor(
     // are not considered complete: website indexing can expose seasons absent from the TV tab.
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(keyword.isNotBlank() && keyword.length <= 80 && page in 1..100)
+        // Motion comics use their own signed App tab and cursor contract. Never mix them with
+        // the website's short-drama result set.
+        if (type == ContentType.COMIC) return appSearch(keyword, page, type)
         var appPage: CatalogPage? = null
         var appFailure: Exception? = null
         var websitePage: CatalogPage? = null
@@ -569,7 +572,7 @@ constructor(
         try {
             appPage = appSearch(keyword, page, type)
         } catch (problem: Exception) {
-            if (problem is InterruptedException || Thread.currentThread().isInterrupted) throw problem
+            if (problem is SearchSessionExpiredException || problem is InterruptedException || Thread.currentThread().isInterrupted) throw problem
             appFailure = problem
         }
         try {
