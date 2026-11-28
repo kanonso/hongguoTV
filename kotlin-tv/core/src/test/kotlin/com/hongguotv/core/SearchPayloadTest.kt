@@ -119,13 +119,13 @@ class SearchPayloadTest {
                 "/reading/bookapi/search/tab/v" -> """
                     {"code":0,"search_tabs":[{"tab_type":11,"has_more":false,"data":[
                       {"video_data":[{"content_type":1004,"series_id":"700001","title":"大佬，你该出手了第五季","episode_cnt":48}]}
-                    ]}]}
+                    ]}]}"""
                 "/api/search/result" -> """
                     {"pageNum":1,"hasMore":false,"searchList":[
                       {"video_data":{"series_id":"700001","series_title":"大佬，你该出手了第五季","genre":"203"}},
                       {"video_data":{"series_id":"700002","series_title":"大佬，你该出手了第四季","genre":"203"}},
                       {"video_data":{"series_id":"799999","series_title":"无关推荐","genre":"203"}}
-                    ]}
+                    ]}"""
                 else -> error("Unexpected search endpoint: ${request.url.encodedPath}")
             }
             okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1)
