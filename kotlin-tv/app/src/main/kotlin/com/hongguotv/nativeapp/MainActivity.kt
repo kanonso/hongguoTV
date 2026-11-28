@@ -2741,6 +2741,8 @@ class MainActivity : Activity() {
         }
         lateinit var dialog: AlertDialog
         fun render(items: List<TvDownloadTask>) {
+            val restoreFocusTag = (currentFocus?.tag as? String)?.takeIf { it.startsWith("download-action:") }
+            var firstAction: View? = null
             list.removeAllViews()
             if (items.isEmpty()) {
                 list.addView(text("下载队列为空。请先在剧集详情选择单集下载或批量下载。", 15f, muted).apply {
@@ -2770,7 +2772,7 @@ class MainActivity : Activity() {
                 card.addView(text(progressText, 12f, muted).apply { setPadding(0, dp(5), 0, dp(4)) })
                 if (task.error.isNotBlank()) card.addView(text(task.error, 12f, Color.rgb(208, 151, 84)))
                 val actions = row()
-                fun action(label: String, callback: () -> Unit) {
+                fun action(label: String, tag: String, callback: () -> Unit) {
                     val control = Button(this).apply {
                         text = label
                         isFocusable = true
@@ -2778,28 +2780,36 @@ class MainActivity : Activity() {
                         textSize = 12f
                         minHeight = dp(42)
                         setPadding(dp(10), 0, dp(10), 0)
+                        this.tag = tag
                         focusStyle(this)
                         setOnClickListener(callback)
                     }
+                    if (firstAction == null) firstAction = control
                     actions.addView(control, lp(-2, -2).apply { rightMargin = dp(6) })
                 }
                 when (task.status) {
                     TvDownloadStatus.PENDING, TvDownloadStatus.DOWNLOADING -> {
-                        action("暂停") { downloadManager.pause(task.id) }
-                        action("取消") { downloadManager.cancel(task.id) }
+                        action("暂停", "download-action:${task.id}:pause") { downloadManager.pause(task.id) }
+                        action("取消", "download-action:${task.id}:cancel") { downloadManager.cancel(task.id) }
                     }
                     TvDownloadStatus.PAUSED, TvDownloadStatus.FAILED -> {
-                        action("继续／重试") { downloadManager.resume(task.id) }
+                        action("继续／重试", "download-action:${task.id}:resume") { downloadManager.resume(task.id) }
                         action("取消") { downloadManager.cancel(task.id) }
                     }
                     TvDownloadStatus.COMPLETED -> {
-                        action("本机播放") { playDownloadedFile(task.filePath, task.seriesTitle) }
-                        action("删除文件") { downloadManager.remove(task.id, deleteFile = true) }
+                        action("本机播放", "download-action:${task.id}:play") { playDownloadedFile(task.filePath, task.seriesTitle) }
+                        action("删除文件", "download-action:${task.id}:delete") { downloadManager.remove(task.id, deleteFile = true) }
                     }
-                    TvDownloadStatus.CANCELLED -> action("移除记录") { downloadManager.remove(task.id) }
+                    TvDownloadStatus.CANCELLED -> action("移除记录", "download-action:${task.id}:remove") { downloadManager.remove(task.id) }
                 }
                 card.addView(actions)
                 list.addView(card, lp(-1, -2).apply { bottomMargin = dp(8) })
+            }
+            if (restoreFocusTag != null) {
+                list.post {
+                    val restored = list.findViewWithTag<View>(restoreFocusTag)
+                    if (restored != null) restored.requestFocus() else firstAction?.requestFocus()
+                }
             }
         }
         dialog = AlertDialog.Builder(this)
