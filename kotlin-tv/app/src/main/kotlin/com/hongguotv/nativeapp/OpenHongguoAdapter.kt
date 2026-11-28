@@ -66,7 +66,7 @@ internal class OpenHongguoAdapter(context: Context) {
                 cover = safeHttps(row.coverUrl),
                 description = row.description.trim(),
                 badge = if (row.episodeCount > 0) "共 ${row.episodeCount} 集" else "社区 SDK",
-                tags = "openhongguo",
+                source = "openhongguo",
             )
         }.distinctBy { it.id }
         val next = result.cursor.takeIf { result.hasMore && it.isNotBlank() }
