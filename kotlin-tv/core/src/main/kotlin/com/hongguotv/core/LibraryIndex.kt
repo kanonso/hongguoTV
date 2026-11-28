@@ -54,7 +54,7 @@ class LibraryIndex(data: BackupData, updates: Map<String, FavoriteUpdate> = empt
 
     fun favoriteUpdate(id: String) = updateRows[id]
 
-    fun favoriteUpdate(series: Series) = updateRows[series.libraryKey]
+    fun favoriteUpdate(series: Series) = if (series.source == "hongguo") updateRows[series.libraryKey] else null
 
     fun updatedFavorites() = updateCount
 
@@ -132,7 +132,7 @@ class LibraryIndex(data: BackupData, updates: Map<String, FavoriteUpdate> = empt
     }
 
     fun observeFavorite(series: Series, count: Int, now: Long, acknowledge: Boolean): Boolean =
-        observeFavorite(series.libraryKey, count, now, acknowledge)
+        if (series.source == "hongguo") observeFavorite(series.libraryKey, count, now, acknowledge) else false
 
     fun observeFavorite(id: String, count: Int, now: Long, acknowledge: Boolean): Boolean {
         if (!favorite(id)) return false
