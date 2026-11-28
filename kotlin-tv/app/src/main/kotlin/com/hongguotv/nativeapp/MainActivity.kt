@@ -1635,7 +1635,7 @@ class MainActivity : Activity() {
                 focusStyle(card)
                 card.contentDescription = item.title
                 card.tag = item.id
-                catalogCards[item.id] = card
+                catalogCards[item.libraryKey] = card
                 val position = if (tab == 2) ranking?.positions?.get(item.id) else null
                 val artwork = FrameLayout(this)
                 card.addView(
@@ -1726,14 +1726,14 @@ class MainActivity : Activity() {
                     )
                 }
                 card.setOnLongClickListener {
-                    catalogFocus = item.id
+                    catalogFocus = item.libraryKey
                     quickActions(item, card)
                     true
                 }
                 card.setOnKeyListener { _, key, event ->
                     if (key == KeyEvent.KEYCODE_MENU) {
                         if (event.action == KeyEvent.ACTION_UP) {
-                            catalogFocus = item.id
+                            catalogFocus = item.libraryKey
                             quickActions(item, card)
                         }
                         true
@@ -1742,7 +1742,7 @@ class MainActivity : Activity() {
                 card.setOnFocusChangeListener { _, focused ->
                     card.background = TvStyle.card(this, focused)
                     if (focused) {
-                        catalogFocus = item.id
+                        catalogFocus = item.libraryKey
                         loadCover(image, item.cover)
                         preview.show(collectionPreviewSeries(item), selectionStatus(item))
                         if (!restoringScroll)
@@ -1942,13 +1942,13 @@ class MainActivity : Activity() {
                         card
                     }
                 },
-                { item -> catalogFocus = item.id },
+                { item -> catalogFocus = item.libraryKey },
                 { item ->
-                    catalogFocus = item.id
+                    catalogFocus = item.libraryKey
                     openDetail(item, false)
                 },
                 { item, anchor ->
-                    catalogFocus = item.id
+                    catalogFocus = item.libraryKey
                     quickActions(item, anchor)
                 },
                 {
@@ -2240,7 +2240,7 @@ class MainActivity : Activity() {
             catalogFocus =
                 remaining
                     .getOrNull(index.coerceAtMost((remaining.size - 1).coerceAtLeast(0)))
-                    ?.id
+                    ?.libraryKey
                     .orEmpty()
             val y = catalogScroll?.scrollY ?: 0
             scrollPositions[catalogPageKey] = y
