@@ -3,7 +3,9 @@ package com.hongguotv.core
 
 // 内容数据访问入口：封装搜索、详情与播放信息请求；界面层通过此处获取内容数据。
 
+import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.util.zip.GZIPOutputStream
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -291,7 +293,6 @@ constructor(
         identity: PlaybackDeviceSession.Profile,
         baseValues: Map<String, String>,
         originalBody: ByteArray?,
-        includeCookie: Boolean = true,
     ): Request.Builder {
         val now = clock()
         val profile = identity.values + mapOf(
@@ -303,44 +304,57 @@ constructor(
         )
         val values = route.mergeQueryValues(profile + baseValues)
         val url = route.url ?: defaultUrl
-        val body = route.applyBodyOverrides(originalBody)
+        // The official App strategy protocol signs and posts the exact gzip bytes.
+        val body = route.applyBodyOverrides(originalBody)?.let { json ->
+            ByteArrayOutputStream().also { output ->
+                GZIPOutputStream(output).use { gzip -> gzip.write(json) }
+            }.toByteArray()
+        }
+        val query = Signer.encode(values + ("_rticket" to now.toString()))
+        val requestHeaders = linkedMapOf<String, String>()
+        route.applyHeaders(requestHeaders)
         val builder = when (route.auth) {
             "v5" -> {
-                val signed = identity.signer(clock, profile).signPlayback(
-                    url, values, body, now = now, field21 = route.field21,
+                val signed = MobilePlayback.signer.signWithField21(
+                    "$url?$query",
+                    body ?: ByteArray(0),
+                    identity.values,
+                    route.field21,
                 )
-                signedRequest(signed.url, signed).apply {
-                    if (includeCookie && identity.cookie.isNotBlank()) header("Cookie", identity.cookie)
-                }
+                Request.Builder().url(signed.url)
+                    .header("User-Agent", requestHeaders["User-Agent"] ?: "okhttp/4.12.0")
+                    .header("Accept", requestHeaders["Accept"] ?: "application/json")
+                    .apply { signed.headers.forEach { (key, value) -> header(key, value) } }
             }
             "player" -> {
-                val query = Signer.encode(values + ("_rticket" to now.toString()))
                 val signingHeaders = PlayerSignature().headers(
                     query, body, identity.values.getValue("device_id"), now,
                 )
                 Request.Builder().url("$url?$query")
-                    .header("User-Agent", VendorConstants.VIDEO_UA)
-                    .header("Accept", "application/json; charset=utf-8")
+                    .header("User-Agent", requestHeaders["User-Agent"] ?: VendorConstants.VIDEO_UA)
+                    .header("Accept", requestHeaders["Accept"] ?: "application/json; charset=utf-8")
                     .header("Sdk-Version", "2")
                     .header("X-XS-From-Web", "0")
+                    .header("passport-sdk-version", "5051452")
+                    .header("x-ss-dp", values["aid"] ?: "8662")
                     .apply { signingHeaders.forEach { (key, value) -> header(key, value) } }
-                    .apply { if (includeCookie && identity.cookie.isNotBlank()) header("Cookie", identity.cookie) }
             }
             "none" -> {
-                val query = Signer.encode(values + mapOf(
+                val noSignatureQuery = Signer.encode(values + mapOf(
                     "ts" to (now / 1000L).toString(),
                     "_rticket" to now.toString(),
                 ))
-                Request.Builder().url("$url?$query")
-                    .header("User-Agent", VendorConstants.VIDEO_UA)
-                    .header("Accept", "application/json; charset=utf-8")
+                Request.Builder().url("$url?$noSignatureQuery")
+                    .header("User-Agent", requestHeaders["User-Agent"] ?: VendorConstants.VIDEO_UA)
+                    .header("Accept", requestHeaders["Accept"] ?: "application/json")
             }
             else -> throw IOException("策略签名族不受支持")
         }
-        val requestHeaders = linkedMapOf<String, String>()
-        route.applyHeaders(requestHeaders)
-        requestHeaders.forEach { (key, value) -> builder.header(key, value) }
-        if (body != null) builder.post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+        if (body != null) {
+            builder.header("Content-Type", "application/json; charset=UTF-8")
+                .header("Content-Encoding", "gzip")
+                .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+        }
         return builder
     }
 
@@ -410,7 +424,6 @@ constructor(
                 identity,
                 profile,
                 payload,
-                includeCookie = false,
             )
         } else {
             val query = Signer.encode(profile.toSortedMap())
