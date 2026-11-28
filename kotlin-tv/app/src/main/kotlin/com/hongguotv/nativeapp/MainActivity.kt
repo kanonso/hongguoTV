@@ -721,7 +721,7 @@ class MainActivity : Activity() {
             homeFeed?.refreshAccountLabel()
             relatedSection?.refreshLabels()
             detail?.series?.let {
-                accountFavoriteButton?.text = detailFavoriteLabel(it.id)
+                accountFavoriteButton?.text = detailFavoriteLabel(it)
             }
             if (
                 screen == "detail" &&
@@ -1676,7 +1676,7 @@ class MainActivity : Activity() {
                     },
                     lp(-1, -2).apply { weight = 1f },
                 )
-                val cloud = if (isHistory()) mergedCloudProgress(item.id) else null
+                val cloud = if (item.source == "hongguo" && isHistory()) mergedCloudProgress(item.id) else null
                 val progress =
                     cloud?.let {
                         WatchProgress(
@@ -1712,17 +1712,17 @@ class MainActivity : Activity() {
                             setPadding(dp(3), 0, 0, 0)
                         }
                 card.addView(badge, lp(-1, -2))
-                if (isFavorites()) favoriteBadges[item.id] = badge
+                if (isFavorites()) favoriteBadges[item.libraryKey] = badge
                 card.setOnClickListener {
                     if (reservationNotice(item, card)) return@setOnClickListener
-                    catalogFocus = item.id
+                    catalogFocus = item.libraryKey
                     openDetail(
                         item,
                         isHistory() ||
                             collection == "resume" ||
                             collection == "updates",
                         cloudProgress =
-                            if (isHistory()) mergedCloudProgress(item.id) else null,
+                            if (item.source == "hongguo" && isHistory()) mergedCloudProgress(item.id) else null,
                     )
                 }
                 card.setOnLongClickListener {
@@ -2293,7 +2293,7 @@ class MainActivity : Activity() {
                     Toast.makeText(this, if (added) "已加入本机收藏" else "已取消本机收藏", Toast.LENGTH_SHORT)
                         .show()
                     refreshLibraryCards(
-                        series.id,
+                        series.libraryKey,
                         !added && (isFavorites() || collection == "updates"),
                     )
                     if (added && series.source == "hongguo") favoriteMonitor.check()
@@ -2925,7 +2925,7 @@ class MainActivity : Activity() {
                     0 -> openDetail(series, true)
                     1 -> {
                         library.setWatched(series, !library.watched(series))
-                        catalogFocus = series.id
+                        catalogFocus = series.libraryKey
                         showCatalog()
                     }
                     2 ->
