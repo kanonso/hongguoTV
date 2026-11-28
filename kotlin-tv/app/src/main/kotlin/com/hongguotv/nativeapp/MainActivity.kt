@@ -41,6 +41,7 @@ class MainActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newFixedThreadPool(3)
     private val repository = ContentRepository(playbackSession = PlaybackDeviceSession.shared)
+    private val playbackSourceSettings by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { PlaybackSourceSettings(applicationContext) }
     private val openHongguoAdapter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         OpenHongguoAdapter(applicationContext)
     }
@@ -414,7 +415,7 @@ class MainActivity : Activity() {
     private var startupApplied = false
     private var settingsAccountStatus: TextView? = null
     private var settingsGroup = 0
-    private val settingsPositions = IntArray(5)
+    private val settingsPositions = IntArray(7)
     private var settingsSidebar = emptyList<View>()
     private var settingsRows = emptyList<View>()
     private var page = 1
@@ -2315,7 +2316,7 @@ class MainActivity : Activity() {
         }
         scroll.addView(content, android.widget.FrameLayout.LayoutParams(-1, -2))
         layout.addView(scroll, lp(0, -1).apply { weight = 1f })
-        val categories = listOf("检查更新", "播放", "外观与操作", "账户", "关于应用")
+        val categories = listOf("检查更新", "播放", "外观与操作", "账户", "关于应用", "播放来源", "下载管理")
         val entries = mutableListOf<View>()
         fun setting(label: String, action: () -> Unit): TextView {
             val view = SettingsValueView(this).apply {
@@ -2466,6 +2467,65 @@ class MainActivity : Activity() {
                     })
                     setting("登录与账户管理") { cloudAccount.show() }
                     setting("手机控制台 · 搜索 / 遥控 / 账户片单") { phoneConsole.show(null) }
+                }
+                5 -> {
+                    content.addView(text("播放来源按上方优先级依次尝试。只有标示可用的来源会参与播放；失败后自动继续下一个来源。", 14f, muted).apply {
+                        setPadding(0, 0, 0, dp(12))
+                    })
+                    val sourceRows = mutableListOf<View>()
+                    fun refreshSources() {
+                        val order = playbackSourceSettings.order()
+                        val enabled = playbackSourceSettings.enabled()
+                        sourceRows.forEach { content.removeView(it) }
+                        sourceRows.clear()
+                        order.forEachIndexed { position, id ->
+                            val source = playbackSourceSettings.sources.first { it.id == id }
+                            val row = row().apply {
+                                focusStyle(this)
+                                setPadding(dp(14), dp(10), dp(12), dp(10))
+                                background = TvVisual.row(this@MainActivity, false)
+                                minimumHeight = dp(62)
+                                setOnFocusChangeListener { _, focused -> background = TvVisual.row(this@MainActivity, focused) }
+                            }
+                            val indexLabel = text("${position + 1}.", 16f, muted)
+                            row.addView(indexLabel, lp(dp(36), -2))
+                            val copy = column()
+                            copy.addView(text(source.title, 15f))
+                            copy.addView(text(source.description, 12f, if (source.available) muted else Color.rgb(208, 151, 84)))
+                            row.addView(copy, lp(0, -2).apply { weight = 1f })
+                            val state = if (!source.available) "Android 不可用" else if (id in enabled) "已啟用" else "已停用"
+                            row.addView(text(state, 12f, if (source.available && id in enabled) TvStyle.primary else muted))
+                            row.setOnClickListener {
+                                val actions = if (!source.available) listOf("查看移植狀態") else listOf(
+                                    if (id in enabled) "停用來源" else "啟用來源",
+                                    "上移",
+                                    "下移",
+                                )
+                                tvTools.choose(source.title, actions, row, { choice ->
+                                    when (actions[choice]) {
+                                        "停用來源" -> playbackSourceSettings.setEnabled(id, false)
+                                        "啟用來源" -> playbackSourceSettings.setEnabled(id, true)
+                                        "上移" -> playbackSourceSettings.move(id, -1)
+                                        "下移" -> playbackSourceSettings.move(id, 1)
+                                    }
+                                    refreshSources()
+                                }, selected = 0)
+                            }
+                            content.addView(row, lp(-1, -2).apply { bottomMargin = dp(6) })
+                            sourceRows += row
+                        }
+                    }
+                    setting("恢復預設來源順序") {
+                        playbackSourceSettings.reset()
+                        refreshSources()
+                    }
+                    refreshSources()
+                }
+                6 -> {
+                    content.addView(text("下載佇列與本機影片管理正在移植到 Android TV 原生工作層。這個版本尚未提供可執行下載按鈕，避免顯示無法完成的假操作。", 15f, muted))
+                    content.addView(text("完成後將支援單集／多集佇列、進度、暫停、恢復、取消、重試與本機播放。", 14f, muted).apply {
+                        setPadding(0, dp(12), 0, 0)
+                    })
                 }
                 4 -> {
                     lateinit var about: TextView
