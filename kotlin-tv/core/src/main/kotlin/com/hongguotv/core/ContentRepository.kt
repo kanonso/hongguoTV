@@ -276,7 +276,13 @@ constructor(
     }
 
     private fun strategyRoute(id: String): PlaybackStrategyRoute? =
-        playbackStrategy()?.routes?.firstOrNull { it.id == id }
+        playbackStrategy()?.routes?.firstOrNull { it.id == id && it.enabled }
+
+    private fun hasStrategyRoute(id: String): Boolean =
+        playbackStrategy()?.routes?.any { it.id == id } == true
+
+    private fun disabledStrategyRoute(id: String): Boolean =
+        playbackStrategy()?.routes?.any { it.id == id && !it.enabled } == true
 
     private fun strategyRequest(
         route: PlaybackStrategyRoute,
@@ -959,13 +965,20 @@ constructor(
             "use_os_player" to "0", "video_platform" to "1024", "source" to "0",
             "from_video_id" to "",
         )
-        // One preferred request; the legacy path retains the bounded cross-host retry budget.
+        // One preferred request; the signed strategy pack may update only this allowlisted route.
+        val configuredRoute = strategyRoute("video_tab")
+        if (disabledStrategyRoute("video_tab")) return null
         for (host in listOf(PlayRetryPlan.hosts.first())) {
-            val request = if (mobileV5) MobilePlayback.videoTabRequest(id, identity.values, host, clock())
-            else playbackRequest(
-                "https://$host/reading/bookapi/video_tab/multi_video_model/v1/",
-                identity, extra,
-            )
+            val defaultUrl = "https://$host/reading/bookapi/video_tab/multi_video_model/v1/"
+            val request = when {
+                mobileV5 && configuredRoute != null ->
+                    MobilePlayback.videoTabRequest(id, identity.values, host, clock(), strategyRoute = configuredRoute)
+                mobileV5 ->
+                    MobilePlayback.videoTabRequest(id, identity.values, host, clock())
+                configuredRoute != null ->
+                    strategyRequest(configuredRoute, defaultUrl, identity, extra, null)
+                else -> playbackRequest(defaultUrl, identity, extra)
+            }
             val text =
                 try {
                     fetchPlaybackModel(request, transport, trace, PlaybackRequestTrace.Stage.GET)
@@ -1054,8 +1067,14 @@ constructor(
             val profile = if (speculative) playbackSession.existing()
                 ?: throw IOException("播放设备尚未就绪") else playbackSession.profile(http)
             try {
-                MobilePlayback.ladder(id, profile.values, http, MobilePlayback.signer, clock())
-                    .also { profile.recordPlayablePrimaryModel() }
+                val preloadRoute = strategyRoute("preload_current")
+                if (disabledStrategyRoute("preload_current")) {
+                    throw EmptyPlaybackResponseException("route=preload_current_disabled")
+                }
+                MobilePlayback.ladder(
+                    id, profile.values, http, MobilePlayback.signer, clock(),
+                    strategyRoute = preloadRoute,
+                ).also { profile.recordPlayablePrimaryModel() }
             } catch (empty: EmptyPlaybackResponseException) {
                 profile.recordEmptyPrimaryModel(clock())
                 if (speculative) throw empty
@@ -1089,10 +1108,14 @@ constructor(
                 if (rows.isNotEmpty()) return@withDeadline StreamLadder(rows)
 
                 // The tab model can contain only bytevc2. The mobile model on the same host can supply HEVC.
-                val alternateHost = PlayRetryPlan.host(0)
+                val alternateRoute = playbackStrategy()?.orderedRoutes()
+                    ?.firstOrNull { it.id in setOf("player_b", "player_a") }
+                val alternateHost = alternateRoute?.url?.toHttpUrlOrNull()?.host ?: PlayRetryPlan.host(0)
                 try {
                     MobilePlayback.ladder(
-                        id, profile.values, http, MobilePlayback.signer, clock(), host = alternateHost,
+                        id, profile.values, http, MobilePlayback.signer, clock(),
+                        host = alternateHost,
+                        strategyRoute = alternateRoute,
                     )
                 } catch (alternate: IOException) {
                     RequestScope.ensureActive()
