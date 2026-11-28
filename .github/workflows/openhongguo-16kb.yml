@@ -22,10 +22,10 @@ jobs:
         with:
           repository: beilunyang/openhongguo
           ref: v0.4.1
-          path: ${{ runner.temp }}/openhongguo
+          path: _work/openhongguo
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version-file: ${{ runner.temp }}/openhongguo/bindings/mobile/core/go.mod
+          go-version-file: _work/openhongguo/bindings/mobile/core/go.mod
           cache: false
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
         with:
@@ -42,10 +42,11 @@ jobs:
           gomobile init
       - name: Rebuild and verify OpenHongguo 16KB ELF alignment
         env:
-          OPENHONGGUO_SOURCE_DIR: ${{ runner.temp }}/openhongguo
+          OPENHONGGUO_SOURCE_DIR: ${{ github.workspace }}/_work/openhongguo
           OPENHONGGUO_OUT_DIR: outputs/openhongguo-16kb
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.1.12297006
-        run: bash kotlin-tv/tools/build_openhongguo_16kb.sh
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.1.12297006"
+          bash kotlin-tv/tools/build_openhongguo_16kb.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: openhongguo-0.4.1-android-16kb-verified
