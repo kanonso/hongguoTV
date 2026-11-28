@@ -77,6 +77,32 @@ internal class OpenHongguoAdapter(context: Context) {
         return CatalogPage(items, next != null)
     }
 
+    /** Fetch every playable episode in order. Cursor changes are checked to avoid a server loop. */
+    fun listEpisodeIds(seriesId: String): List<String> {
+        require(seriesId.matches(Regex("[0-9]{6,30}")))
+        val result = mutableListOf<Pair<Int, String>>()
+        var cursor: String? = null
+        val seenCursors = mutableSetOf<String>()
+        repeat(50) {
+            val page = try {
+                runBlocking(Dispatchers.IO) {
+                    client.listEpisodes(seriesId, dev.openhongguo.EpisodeOptions(cursor = cursor, pageSize = 100))
+                }
+            } catch (failure: Exception) {
+                throw IOException("openhongguo 分集列表暂不可用", failure)
+            }
+            page.items.forEach { episode ->
+                if (episode.playable && episode.id.matches(Regex("[0-9]{1,30}")))
+                    result += episode.number to episode.id
+            }
+            if (!page.hasMore || page.cursor.isBlank() || !seenCursors.add(page.cursor)) return result.distinctBy { it.second }
+                .sortedWith(compareBy<Pair<Int, String>> { it.first }.thenBy { it.second }).map { it.second }
+            cursor = page.cursor
+        }
+        if (result.isEmpty()) throw IOException("openhongguo 没有返回可播放分集")
+        return result.distinctBy { it.second }.sortedBy { it.first }.map { it.second }
+    }
+
     /** Resolve one episode through the SDK and expose only progressive HTTPS MP4-like streams. */
     fun resolvePlayback(episodeId: String): StreamLadder {
         require(episodeId.matches(Regex("[0-9]{1,30}")))
