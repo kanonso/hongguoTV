@@ -248,7 +248,7 @@ internal fun openStream(
     metadataAhead: List<String> = emptyList(),
     speculative: Boolean = false,
     sourceOrder: List<String> = listOf("openhongguo", "sdk", "app", "web"),
-    enabledSources: Set<String> = setOf("app", "web"),
+    enabledSources: Set<String> = setOf("app"),
     openHongguoLadder: (() -> StreamLadder)? = null,
     supportsTrack: (VideoTracks.Track?) -> Boolean,
 ): OpenedStream? {
