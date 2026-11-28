@@ -61,6 +61,7 @@ data class Series(
     val description: String = "",
     val badge: String = "",
     val tags: String = "",
+    val source: String = "hongguo",
 ) {
     fun toJson() =
         JSONObject()
@@ -70,6 +71,7 @@ data class Series(
             .put("description", description)
             .put("badge", badge)
             .put("tags", tags)
+            .put("source", source)
 
     companion object {
         fun fromJson(o: JSONObject) =
@@ -80,6 +82,7 @@ data class Series(
                 o.str("description"),
                 o.str("badge"),
                 o.str("tags"),
+                o.str("source").ifBlank { "hongguo" },
             )
     }
 }
