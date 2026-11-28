@@ -80,29 +80,10 @@ class MainActivity : Activity() {
             (status.error.takeIf { it.isNotBlank() }?.let { "状态：$it" } ?: "签名校验：已启用")
     }
     private val playbackSourceSettings by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { PlaybackSourceSettings(applicationContext) }
-    private val downloadManagerDelegate = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        TvDownloadManager(this) { episodeId, seriesTitle, episodeNumber, episodeCount, source ->
-            val configuredSources = playbackSourceSettings.enabled()
-            val selectedSources = if (source == "openhongguo") configuredSources.intersect(setOf("openhongguo"))
-                else configuredSources
-            openStream(
-                repository.http,
-                repository,
-                episodeId,
-                library.maxQuality,
-                CodecCapabilities::supports,
-                recentPlaybackSources,
-                sourceOrder = playbackSourceSettings.order(),
-                enabledSources = selectedSources,
-                openHongguoLadder = {
-                    if (source == "openhongguo") openHongguoAdapter.resolvePlayback(episodeId)
-                    else openHongguoAdapter.resolvePlaybackBySeriesTitle(seriesTitle, episodeNumber, episodeCount)
-                },
-            ) { track -> track == null || CodecCapabilities.supports(track) }
-                ?: throw java.io.IOException("没有电视可播放的清晰度")
-        }
+    // Application-scoped queue: downloads must not retain or depend on this Activity.
+    private val downloadManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        TvDownloadRuntime.get(applicationContext, schedulePending = true)
     }
-    private val downloadManager by downloadManagerDelegate
 
     private val openHongguoAdapter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         OpenHongguoAdapter(applicationContext)
@@ -3145,6 +3126,7 @@ class MainActivity : Activity() {
             downloadManager.enqueue(
                 data.series.id, data.series.title, data.episodes[episodeIndex],
                 episodeIndex + 1, source = data.series.source, episodeCount = data.episodes.size,
+                maxQuality = library.maxQuality,
             )
             showDownloadManager(play)
         }
@@ -3152,6 +3134,7 @@ class MainActivity : Activity() {
             downloadManager.enqueueAll(
                 data.series.id, data.series.title, data.episodes,
                 source = data.series.source, episodeCount = data.episodes.size,
+                maxQuality = library.maxQuality,
             )
             showDownloadManager(play)
         }
@@ -5726,7 +5709,6 @@ class MainActivity : Activity() {
         saveProgress()
         cloudAccount.destroy()
         releasePlayer()
-        if (downloadManagerDelegate.isInitialized()) downloadManager.close()
         library.close()
         artwork.close()
         releaseCatalogViews()

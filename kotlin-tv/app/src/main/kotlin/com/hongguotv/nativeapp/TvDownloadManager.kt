@@ -24,6 +24,7 @@ internal data class TvDownloadTask(
     val episodeId: String,
     val episodeNumber: Int,
     val episodeCount: Int = 0,
+    val maxQuality: Int = 1080,
     val source: String,
     val status: TvDownloadStatus,
     val bytes: Long = 0,
@@ -42,7 +43,8 @@ internal data class TvDownloadTask(
  */
 internal class TvDownloadManager(
     context: Context,
-    private val open: (episodeId: String, seriesTitle: String, episodeNumber: Int, episodeCount: Int, source: String) -> OpenedStream,
+    private val open: (episodeId: String, seriesTitle: String, episodeNumber: Int, episodeCount: Int, source: String, maxQuality: Int) -> OpenedStream,
+    private val requestExecution: () -> Unit,
 ) {
     private val app = context.applicationContext
     private val directory = File(app.filesDir, "downloads").apply { mkdirs() }
@@ -53,6 +55,7 @@ internal class TvDownloadManager(
     private val tasks = linkedMapOf<String, TvDownloadTask>()
     private val listeners = CopyOnWriteArrayList<(List<TvDownloadTask>) -> Unit>()
     private var draining = false
+    private var executionAllowed = false
 
     init {
         val array = runCatching { JSONArray(preferences.getString("tasks", "[]")) }.getOrNull() ?: JSONArray()
@@ -60,13 +63,11 @@ internal class TvDownloadManager(
             val row = array.optJSONObject(i) ?: continue
             val restored = decode(row) ?: continue
             tasks[restored.id] = if (restored.status == TvDownloadStatus.DOWNLOADING)
-                restored.copy(status = TvDownloadStatus.PAUSED, bytes = File(restored.filePath).takeIf(File::exists)?.length() ?: 0)
+                restored.copy(status = TvDownloadStatus.PENDING, bytes = File(restored.filePath + ".part").takeIf(File::exists)?.length() ?: 0)
             else restored
         }
         persistLocked()
-        // Resume tasks that had not started before a process/activity restart. In-flight tasks
-        // are restored as PAUSED above and require an explicit user action.
-        if (tasks.values.any { it.status == TvDownloadStatus.PENDING }) drain()
+        // Construction restores state only. The OS job/service starts network work explicitly.
     }
 
     fun snapshot(): List<TvDownloadTask> = synchronized(lock) { tasks.values.toList() }
@@ -77,7 +78,10 @@ internal class TvDownloadManager(
         return { listeners -= listener }
     }
 
-    fun enqueue(seriesId: String, seriesTitle: String, episodeId: String, episodeNumber: Int, source: String = "", episodeCount: Int = 0): String {
+    fun enqueue(
+        seriesId: String, seriesTitle: String, episodeId: String, episodeNumber: Int,
+        source: String = "", episodeCount: Int = 0, maxQuality: Int = 1080,
+    ): String {
         require(seriesId.matches(Regex("[0-9]{1,30}")) && episodeId.matches(Regex("[0-9]{1,30}")))
         require(episodeNumber in 1..10000)
         val id = UUID.randomUUID().toString()
@@ -86,19 +90,40 @@ internal class TvDownloadManager(
         synchronized(lock) {
             tasks[id] = TvDownloadTask(
                 id, seriesId, seriesTitle, episodeId, episodeNumber,
-                episodeCount = episodeCount, source = source, status = TvDownloadStatus.PENDING,
-                filePath = target.absolutePath,
+                episodeCount = episodeCount, maxQuality = maxQuality.coerceAtLeast(1),
+                source = source, status = TvDownloadStatus.PENDING, filePath = target.absolutePath,
             )
             persistLocked()
         }
         publish()
-        drain()
+        requestExecution()
         return id
     }
 
-    fun enqueueAll(seriesId: String, seriesTitle: String, episodeIds: List<String>, source: String = "", episodeCount: Int = episodeIds.size) {
-        episodeIds.take(500).forEachIndexed { index, episodeId ->
-            enqueue(seriesId, seriesTitle, episodeId, index + 1, source, episodeCount)
+    fun enqueueAll(
+        seriesId: String, seriesTitle: String, episodeIds: List<String>,
+        source: String = "", episodeCount: Int = episodeIds.size, maxQuality: Int = 1080,
+    ) {
+        require(seriesId.matches(Regex("[0-9]{1,30}")))
+        val items = episodeIds.take(500)
+        require(items.all { it.matches(Regex("[0-9]{1,30}")) })
+        synchronized(lock) {
+            items.forEachIndexed { index, episodeId ->
+                val number = index + 1
+                val id = UUID.randomUUID().toString()
+                val safeTitle = seriesTitle.replace(Regex("[^\\p{L}\\p{N}._ -]"), "_").trim().take(48).ifBlank { "短剧" }
+                val target = File(directory, "${safeTitle}_第${number}集_${id.take(8)}.mp4")
+                tasks[id] = TvDownloadTask(
+                    id, seriesId, seriesTitle, episodeId, number,
+                    episodeCount = episodeCount, maxQuality = maxQuality.coerceAtLeast(1),
+                    source = source, status = TvDownloadStatus.PENDING, filePath = target.absolutePath,
+                )
+            }
+            persistLocked()
+        }
+        if (items.isNotEmpty()) {
+            publish()
+            requestExecution()
         }
     }
 
@@ -121,7 +146,31 @@ internal class TvDownloadManager(
             persistLocked()
         }
         publish()
+        requestExecution()
+    }
+
+    fun resumePending() {
+        synchronized(lock) { executionAllowed = true }
         drain()
+    }
+
+    fun suspendForSystemStop() {
+        synchronized(lock) {
+            executionAllowed = false
+            tasks.entries.toList().forEach { (id, task) ->
+                if (task.status == TvDownloadStatus.DOWNLOADING) {
+                    val bytes = File(task.filePath + ".part").takeIf(File::exists)?.length() ?: task.bytes
+                    tasks[id] = task.copy(status = TvDownloadStatus.PENDING, bytes = bytes, error = "")
+                }
+            }
+            activeVideos.values.toList().forEach { it.close() }
+            persistLocked()
+        }
+        publish()
+    }
+
+    fun hasRunnableTasks(): Boolean = synchronized(lock) {
+        tasks.values.any { it.status == TvDownloadStatus.PENDING || it.status == TvDownloadStatus.DOWNLOADING }
     }
 
     fun cancel(id: String) {
@@ -148,13 +197,16 @@ internal class TvDownloadManager(
     }
 
     fun close() {
-        synchronized(lock) { activeVideos.values.toList().forEach { it.close() } }
+        synchronized(lock) {
+            executionAllowed = false
+            activeVideos.values.toList().forEach { it.close() }
+        }
         executor.shutdownNow()
     }
 
     private fun drain() {
         synchronized(lock) {
-            if (draining || executor.isShutdown) return
+            if (!executionAllowed || draining || executor.isShutdown) return
             draining = true
         }
         try {
@@ -162,7 +214,7 @@ internal class TvDownloadManager(
                 try {
                     while (true) {
                     val task = synchronized(lock) {
-                        tasks.values.firstOrNull { it.status == TvDownloadStatus.PENDING }?.also {
+                        if (!executionAllowed) null else tasks.values.firstOrNull { it.status == TvDownloadStatus.PENDING }?.also {
                             tasks[it.id] = it.copy(status = TvDownloadStatus.DOWNLOADING, error = "")
                             persistLocked()
                         }
@@ -171,8 +223,13 @@ internal class TvDownloadManager(
                     execute(task.id)
                 }
                 } finally {
-                    synchronized(lock) { draining = false }
-                    if (synchronized(lock) { tasks.values.any { it.status == TvDownloadStatus.PENDING } }) drain()
+                    val continueQueue = synchronized(lock) {
+                        draining = false
+                        val pending = tasks.values.any { it.status == TvDownloadStatus.PENDING }
+                        if (!pending) executionAllowed = false
+                        pending && executionAllowed
+                    }
+                    if (continueQueue) drain()
                 }
             }
         } catch (_: RejectedExecutionException) {
@@ -184,7 +241,7 @@ internal class TvDownloadManager(
         var opened: OpenedStream? = null
         try {
             val task = synchronized(lock) { tasks[id] } ?: return
-            opened = open(task.episodeId, task.seriesTitle, task.episodeNumber, task.episodeCount, task.source)
+            opened = open(task.episodeId, task.seriesTitle, task.episodeNumber, task.episodeCount, task.source, task.maxQuality)
             val video = opened.video
             synchronized(lock) {
                 if (tasks[id]?.status != TvDownloadStatus.DOWNLOADING) throw IOException("下载已暂停或取消")
@@ -257,6 +314,9 @@ internal class TvDownloadManager(
                 TvDownloadStatus.PAUSED, TvDownloadStatus.CANCELLED -> {
                     update(id) { it.copy(bytes = File(it.filePath + ".part").takeIf(File::exists)?.length() ?: it.bytes) }
                 }
+                TvDownloadStatus.PENDING -> {
+                    update(id) { it.copy(bytes = File(it.filePath + ".part").takeIf(File::exists)?.length() ?: it.bytes) }
+                }
                 else -> update(id) {
                     it.copy(status = TvDownloadStatus.FAILED,
                         bytes = File(it.filePath + ".part").takeIf(File::exists)?.length() ?: it.bytes,
@@ -296,7 +356,8 @@ internal class TvDownloadManager(
     private fun encode(task: TvDownloadTask) = JSONObject().apply {
         put("id", task.id); put("seriesId", task.seriesId); put("seriesTitle", task.seriesTitle)
         put("episodeId", task.episodeId); put("episodeNumber", task.episodeNumber)
-        put("episodeCount", task.episodeCount); put("source", task.source); put("status", task.status.name); put("bytes", task.bytes); put("total", task.total)
+        put("episodeCount", task.episodeCount); put("maxQuality", task.maxQuality)
+        put("source", task.source); put("status", task.status.name); put("bytes", task.bytes); put("total", task.total)
         put("filePath", task.filePath); put("error", task.error); put("fingerprint", task.fingerprint)
     }
 
@@ -306,6 +367,7 @@ internal class TvDownloadManager(
             seriesTitle = row.optString("seriesTitle"), episodeId = row.getString("episodeId"),
             episodeNumber = row.optInt("episodeNumber", 1),
             episodeCount = row.optInt("episodeCount", 0),
+            maxQuality = row.optInt("maxQuality", 1080).coerceAtLeast(1),
             source = row.optString("source"),
             status = TvDownloadStatus.valueOf(row.optString("status", "PAUSED")),
             bytes = row.optLong("bytes"), total = row.optLong("total"),
