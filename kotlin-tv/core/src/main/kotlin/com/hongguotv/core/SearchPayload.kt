@@ -84,7 +84,7 @@ internal object SearchPayload {
             is String -> raw == "1" || raw.equals("true", ignoreCase = true)
             else -> false
         }
-        return Page(prioritize(items.distinctBy { it.id }, keyword), more,
+        return Page(prioritize(items.distinctBy { it.source to it.id }, keyword), more,
             tab.str("search_id"), tab.str("passback"), tab.str("next_offset").toIntOrNull()?.takeIf { it >= 0 })
     }
 
