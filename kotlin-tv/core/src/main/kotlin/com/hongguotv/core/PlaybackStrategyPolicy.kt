@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package com.hongguotv.core
 
+import java.io.IOException
+import org.json.JSONObject
+
 /** A verified, data-only route override from the signed playback strategy pack. */
 data class PlaybackStrategyRoute(
     val id: String,
