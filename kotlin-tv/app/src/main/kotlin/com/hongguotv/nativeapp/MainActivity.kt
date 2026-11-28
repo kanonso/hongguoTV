@@ -42,7 +42,7 @@ class MainActivity : Activity() {
     private val io = Executors.newFixedThreadPool(3)
     private val repository = ContentRepository(playbackSession = PlaybackDeviceSession.shared)
     private val playbackSourceSettings by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { PlaybackSourceSettings(applicationContext) }
-    private val downloadManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+    private val downloadManagerDelegate = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         TvDownloadManager(this) { episodeId ->
             openStream(
                 repository.http,
@@ -58,6 +58,7 @@ class MainActivity : Activity() {
                 ?: throw java.io.IOException("没有电视可播放的清晰度")
         }
     }
+    private val downloadManager by downloadManagerDelegate
 
     private val openHongguoAdapter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         OpenHongguoAdapter(applicationContext)
@@ -5577,6 +5578,7 @@ class MainActivity : Activity() {
         saveProgress()
         cloudAccount.destroy()
         releasePlayer()
+        if (downloadManagerDelegate.isInitialized()) downloadManager.close()
         library.close()
         artwork.close()
         releaseCatalogViews()
