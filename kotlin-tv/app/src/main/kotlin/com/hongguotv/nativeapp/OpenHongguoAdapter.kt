@@ -85,7 +85,7 @@ internal class OpenHongguoAdapter(context: Context) {
         val result = mutableListOf<Pair<Int, String>>()
         var cursor: String? = null
         val seenCursors = mutableSetOf<String>()
-        repeat(50) {
+        for (pageIndex in 0 until 50) {
             val page = try {
                 runBlocking(Dispatchers.IO) {
                     client.listEpisodes(seriesId, dev.openhongguo.EpisodeOptions(cursor = cursor, pageSize = 100))
@@ -97,12 +97,12 @@ internal class OpenHongguoAdapter(context: Context) {
                 if (episode.playable && episode.number in 1..10000 && episode.id.matches(Regex("[0-9]{1,30}")))
                     result += episode.number to episode.id
             }
-            if (!page.hasMore || page.cursor.isBlank() || !seenCursors.add(page.cursor))
-                return result.distinctBy { it.first }.sortedBy { it.first }
+            if (!page.hasMore) return result.distinctBy { it.first }.sortedBy { it.first }
+            if (page.cursor.isBlank() || !seenCursors.add(page.cursor))
+                throw IOException("openhongguo 分集分页游标异常，无法确认目录完整")
             cursor = page.cursor
         }
-        if (result.isEmpty()) throw IOException("openhongguo 没有返回可播放分集")
-        return result.distinctBy { it.first }.sortedBy { it.first }
+        throw IOException("openhongguo 分集目录超过最大分页限制，无法确认目录完整")
     }
 
     fun listEpisodeIds(seriesId: String): List<String> =
@@ -127,6 +127,7 @@ internal class OpenHongguoAdapter(context: Context) {
         val candidates = linkedMapOf<String, String>()
         var cursor: String? = null
         val seenCursors = mutableSetOf<String>()
+        var searchComplete = false
         for (pageIndex in 0 until 5) {
             val page = try {
                 runBlocking(Dispatchers.IO) {
@@ -139,9 +140,15 @@ internal class OpenHongguoAdapter(context: Context) {
                 if (row.id.matches(Regex("[0-9]{6,30}")) && normalizeTitle(row.title) == target)
                     candidates[row.id] = row.title
             }
-            if (!page.hasMore || page.cursor.isBlank() || !seenCursors.add(page.cursor)) break
+            if (!page.hasMore) {
+                searchComplete = true
+                break
+            }
+            if (page.cursor.isBlank() || !seenCursors.add(page.cursor))
+                throw IOException("openhongguo 系列映射分页游标异常，无法确认同名结果唯一")
             cursor = page.cursor
         }
+        if (!searchComplete) throw IOException("openhongguo 同名系列结果过多，无法确认映射唯一")
         if (candidates.isEmpty()) throw IOException("openhongguo 没有找到同名剧集，安全跳过该来源")
         val matches = candidates.keys.mapNotNull { seriesId ->
             val completeEpisodes = listPlayableEpisodes(seriesId)
