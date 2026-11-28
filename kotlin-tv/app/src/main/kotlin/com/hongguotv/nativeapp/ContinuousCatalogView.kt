@@ -89,7 +89,7 @@ internal class ContinuousCatalogView(
             override fun getItem(position: Int) = entries[position]
 
             override fun getItemId(position: Int) =
-                entries.getOrNull(position)?.let { ids.getOrPut(it.id) { nextId++ } }
+                entries.getOrNull(position)?.let { ids.getOrPut(it.libraryKey) { nextId++ } }
                     ?: AdapterView.INVALID_ROW_ID
 
             override fun hasStableIds() = true
@@ -97,7 +97,7 @@ internal class ContinuousCatalogView(
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
                 val item = entries[position]
                 return bind(item, convertView).apply {
-                    tag = item.id
+                    tag = item.libraryKey
                     isFocusable = false
                     isClickable = false
                     isLongClickable = false
@@ -293,14 +293,14 @@ internal class ContinuousCatalogView(
 
     fun show(items: List<Series>, hasMore: Boolean, position: Position? = null) {
         entries.clear()
-        entries.addAll(items.distinctBy { it.id })
+        entries.addAll(items.distinctBy { it.libraryKey })
         available = hasMore
         busy = false
         failed = false
         restorePosition = position
         cards.notifyDataSetChanged()
         paintStatus()
-        val index = entries.indexOfFirst { it.id == position?.id }.coerceAtLeast(0)
+        val index = entries.indexOfFirst { it.libraryKey == position?.id }.coerceAtLeast(0)
         grid.setSelection(if (entries.isEmpty()) AdapterView.INVALID_POSITION else index)
         fullTitle.text = entries.getOrNull(index)?.title.orEmpty()
         entries.getOrNull(index)?.let(selected)
@@ -314,7 +314,7 @@ internal class ContinuousCatalogView(
 
     fun capture(): Position? =
         entries.getOrNull(grid.selectedItemPosition)?.let {
-            Position(it.id, grid.selectedView?.top ?: 0)
+            Position(it.libraryKey, grid.selectedView?.top ?: 0)
         } ?: restorePosition
 
     fun requestMore(manual: Boolean) {
@@ -333,9 +333,9 @@ internal class ContinuousCatalogView(
 
     fun append(items: List<Series>, hasMore: Boolean) {
         if (closed) return
-        val seen = entries.mapTo(HashSet()) { it.id }
+        val seen = entries.mapTo(HashSet()) { it.libraryKey }
         val firstNew = entries.size
-        entries.addAll(items.filter { seen.add(it.id) })
+        entries.addAll(items.filter { seen.add(it.libraryKey) })
         available = hasMore
         busy = false
         failed = false
