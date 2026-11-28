@@ -13,6 +13,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.io.IOException
+import java.text.Normalizer
+import java.util.Locale
 
 /**
  * Android adapter for the official Apache-2.0 openhongguo SDK.
@@ -78,7 +80,7 @@ internal class OpenHongguoAdapter(context: Context) {
     }
 
     /** Fetch every playable episode in order. Cursor changes are checked to avoid a server loop. */
-    fun listEpisodeIds(seriesId: String): List<String> {
+    fun listPlayableEpisodes(seriesId: String): List<Pair<Int, String>> {
         require(seriesId.matches(Regex("[0-9]{6,30}")))
         val result = mutableListOf<Pair<Int, String>>()
         var cursor: String? = null
@@ -92,16 +94,65 @@ internal class OpenHongguoAdapter(context: Context) {
                 throw IOException("openhongguo 分集列表暂不可用", failure)
             }
             page.items.forEach { episode ->
-                if (episode.playable && episode.id.matches(Regex("[0-9]{1,30}")))
+                if (episode.playable && episode.number in 1..10000 && episode.id.matches(Regex("[0-9]{1,30}")))
                     result += episode.number to episode.id
             }
-            if (!page.hasMore || page.cursor.isBlank() || !seenCursors.add(page.cursor)) return result.distinctBy { it.second }
-                .sortedWith(compareBy<Pair<Int, String>> { it.first }.thenBy { it.second }).map { it.second }
+            if (!page.hasMore || page.cursor.isBlank() || !seenCursors.add(page.cursor))
+                return result.distinctBy { it.first }.sortedBy { it.first }
             cursor = page.cursor
         }
         if (result.isEmpty()) throw IOException("openhongguo 没有返回可播放分集")
-        return result.distinctBy { it.second }.sortedBy { it.first }.map { it.second }
+        return result.distinctBy { it.first }.sortedBy { it.first }
     }
+
+    fun listEpisodeIds(seriesId: String): List<String> =
+        listPlayableEpisodes(seriesId).map { it.second }
+
+    /**
+     * Safe cross-provider mapping for a Hongguo-native series: search openhongguo by the full
+     * displayed series title, require exactly one normalized exact-title match, then map the
+     * 1-based episode number from its own episode directory. Never reuse a Hongguo episode ID.
+     */
+    fun resolvePlaybackBySeriesTitle(seriesTitle: String, episodeNumber: Int): StreamLadder {
+        require(seriesTitle.isNotBlank() && seriesTitle.length <= 200 && episodeNumber in 1..10000)
+        val target = normalizeTitle(seriesTitle)
+        if (target.isBlank()) throw IOException("无法识别剧名，跳过 openhongguo 来源")
+        val candidates = linkedMapOf<String, String>()
+        var cursor: String? = null
+        val seenCursors = mutableSetOf<String>()
+        repeat(5) {
+            val page = try {
+                runBlocking(Dispatchers.IO) {
+                    client.search(seriesTitle, SearchOptions(cursor = cursor, pageSize = 50))
+                }
+            } catch (failure: Exception) {
+                throw IOException("openhongguo 系列映射搜索暂不可用", failure)
+            }
+            page.items.forEach { row ->
+                if (row.id.matches(Regex("[0-9]{6,30}")) && normalizeTitle(row.title) == target)
+                    candidates[row.id] = row.title
+            }
+            if (!page.hasMore || page.cursor.isBlank() || !seenCursors.add(page.cursor)) return@repeat
+            cursor = page.cursor
+        }
+        if (candidates.isEmpty()) throw IOException("openhongguo 没有找到同名剧集，安全跳过该来源")
+        val matches = candidates.keys.mapNotNull { seriesId ->
+            val episode = listPlayableEpisodes(seriesId).firstOrNull { it.first == episodeNumber }
+            episode?.let { seriesId to it.second }
+        }
+        if (matches.size != 1) {
+            throw IOException(
+                if (matches.isEmpty()) "openhongguo 同名剧没有对应分集，安全跳过该来源"
+                else "openhongguo 找到多个同名分集，无法确认对应关系，安全跳过该来源",
+            )
+        }
+        return resolvePlayback(matches.single().second)
+    }
+
+    private fun normalizeTitle(value: String): String =
+        Normalizer.normalize(value, Normalizer.Form.NFKC)
+            .lowercase(Locale.ROOT)
+            .filter { it.isLetterOrDigit() }
 
     /** Resolve one episode through the SDK and expose only progressive HTTPS MP4-like streams. */
     fun resolvePlayback(episodeId: String): StreamLadder {
