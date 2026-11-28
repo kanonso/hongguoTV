@@ -105,3 +105,6 @@ https://github.com/qq294716498/HongguoTV-Phone-TV-NoAds/tree/8eafa3908e9191c0a5a
   GPL-covered implementation must retain copyright and license notices and satisfy
   corresponding source-offer/source-code obligations. The Android helper binary is not
   present for Android TV and is explicitly marked unavailable rather than bundled.
+
+- EdDSA-Java BloxBean patch 0.3.1: https://github.com/bloxbean/ed25519-java
+  Licensed under CC0 1.0 Universal. Used only to verify project-signed Ed25519 strategy envelopes on Android API levels that do not provide a platform Ed25519 Signature implementation.
