@@ -2874,7 +2874,7 @@ class MainActivity : Activity() {
             EditedMediaItem.Builder(MediaItem.fromUri(android.net.Uri.fromFile(file))).build()
         }
         val sequence = EditedMediaItemSequence.withAudioAndVideoFrom(editedItems)
-        val composition = Composition.Builder(sequence).build()
+        val composition = Composition.Builder(listOf(sequence)).build()
         lateinit var progressDialog: AlertDialog
         val listener = object : Transformer.Listener {
             override fun onCompleted(composition: Composition, result: ExportResult) {
