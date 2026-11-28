@@ -185,6 +185,9 @@ internal class TvDownloadManager(
             }
             executionAllowed = true
             executionSessionActive = true
+            // Flush this marker before any transfer starts. If Android's Task Manager Stop kills
+            // the process without onStopJob(), the next process must not auto-resume this queue.
+            preferences.edit().putBoolean("execution_active", true).commit()
             persistLocked()
         }
         drain()
