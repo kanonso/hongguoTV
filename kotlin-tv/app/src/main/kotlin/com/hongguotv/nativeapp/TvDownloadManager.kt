@@ -392,12 +392,13 @@ internal class TvDownloadManager(
             val sizeExceeded = java.util.concurrent.atomic.AtomicBoolean(false)
             try {
                 val offlineUri = hlsStore.offlineUri(rawUrl)
-                downloader = hlsStore.createDownloader(task.id, rawUrl)
+                val currentDownloader = hlsStore.createDownloader(task.id, rawUrl)
+                downloader = currentDownloader
                 synchronized(lock) {
                     if (tasks[task.id]?.status != TvDownloadStatus.DOWNLOADING) {
                         throw IOException("下載已暫停或取消")
                     }
-                    activeHlsDownloaders[task.id] = downloader
+                    activeHlsDownloaders[task.id] = currentDownloader
                     tasks[task.id] = task.copy(
                         filePath = task.filePath.removeSuffix(".mp4") + ".m3u8",
                         mediaFormat = "hls",
@@ -409,7 +410,7 @@ internal class TvDownloadManager(
                 publish()
                 val maxBytes = java.util.concurrent.atomic.AtomicLong(0L)
                 val reportedBytes = java.util.concurrent.atomic.AtomicLong(0L)
-                downloader.download { contentLength, bytesDownloaded, percentDownloaded ->
+                currentDownloader.download { contentLength, bytesDownloaded, percentDownloaded ->
                     val currentBytes = maxBytes.updateAndGet { old -> maxOf(old, bytesDownloaded) }
                     if (currentBytes > MAX_FILE_BYTES) {
                         if (sizeExceeded.compareAndSet(false, true)) downloader.cancel()
