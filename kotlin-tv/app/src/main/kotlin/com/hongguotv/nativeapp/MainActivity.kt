@@ -2538,7 +2538,7 @@ class MainActivity : Activity() {
                         setPadding(0, 0, 0, dp(12))
                     })
                     val sourceRows = mutableListOf<View>()
-                    fun refreshSources() {
+                    fun refreshSources(restoreFocusTag: String? = null) {
                         val order = playbackSourceSettings.order()
                         val enabled = playbackSourceSettings.enabled()
                         sourceRows.forEach { content.removeView(it) }
@@ -2560,7 +2560,7 @@ class MainActivity : Activity() {
                             row.addView(copy, lp(0, -2).apply { weight = 1f })
                             val state = if (!source.available) "Android 不可用" else if (id in enabled) "已啟用" else "已停用"
                             row.addView(text(state, 12f, if (source.available && id in enabled) TvStyle.primary else muted))
-                            fun sourceAction(label: String, active: Boolean, action: () -> Unit) {
+                            fun sourceAction(label: String, active: Boolean, tag: String, action: () -> Unit) {
                                 val control = Button(this).apply {
                                     text = label
                                     isAllCaps = false
@@ -2571,27 +2571,31 @@ class MainActivity : Activity() {
                                     minHeight = dp(42)
                                     setPadding(dp(8), 0, dp(8), 0)
                                     focusStyle(this)
+                                    this.tag = tag
                                     setOnClickListener(action)
                                 }
                                 row.addView(control, lp(-2, -2).apply { leftMargin = dp(4) })
                             }
-                            sourceAction("↑", source.available && position > 0) {
+                            sourceAction("↑", position > 0, "source-up-$id") {
                                 playbackSourceSettings.move(id, -1)
-                                refreshSources()
+                                refreshSources("source-up-$id")
                             }
-                            sourceAction("↓", source.available && position < order.lastIndex) {
+                            sourceAction("↓", position < order.lastIndex, "source-down-$id") {
                                 playbackSourceSettings.move(id, 1)
-                                refreshSources()
+                                refreshSources("source-down-$id")
                             }
-                            sourceAction(if (id in enabled) "停用" else "啟用", source.available) {
+                            sourceAction(if (id in enabled) "停用" else "啟用", source.available, "source-toggle-$id") {
                                 playbackSourceSettings.setEnabled(id, id !in enabled)
-                                refreshSources()
+                                refreshSources("source-toggle-$id")
                             }
                             row.setOnClickListener {
                                 tvTools.info(source.title, source.description, row)
                             }
                             content.addView(row, lp(-1, -2).apply { bottomMargin = dp(6) })
                             sourceRows += row
+                        }
+                        restoreFocusTag?.let { tag ->
+                            content.post { content.findViewWithTag<View>(tag)?.requestFocus() }
                         }
                     }
                     setting("恢復預設來源順序") {
