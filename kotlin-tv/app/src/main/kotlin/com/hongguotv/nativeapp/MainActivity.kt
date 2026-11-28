@@ -42,6 +42,23 @@ class MainActivity : Activity() {
     private val io = Executors.newFixedThreadPool(3)
     private val repository = ContentRepository(playbackSession = PlaybackDeviceSession.shared)
     private val playbackSourceSettings by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { PlaybackSourceSettings(applicationContext) }
+    private val downloadManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        TvDownloadManager(this) { episodeId ->
+            openStream(
+                repository.http,
+                repository,
+                episodeId,
+                library.maxQuality,
+                CodecCapabilities::supports,
+                recentPlaybackSources,
+                sourceOrder = playbackSourceSettings.order(),
+                enabledSources = playbackSourceSettings.enabled(),
+                openHongguoLadder = { openHongguoAdapter.resolvePlayback(episodeId) },
+            ) { track -> track == null || CodecCapabilities.supports(track) }
+                ?: throw java.io.IOException("没有电视可播放的清晰度")
+        }
+    }
+
     private val openHongguoAdapter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         OpenHongguoAdapter(applicationContext)
     }
@@ -2522,10 +2539,13 @@ class MainActivity : Activity() {
                     refreshSources()
                 }
                 6 -> {
-                    content.addView(text("下載佇列與本機影片管理正在移植到 Android TV 原生工作層。這個版本尚未提供可執行下載按鈕，避免顯示無法完成的假操作。", 15f, muted))
-                    content.addView(text("完成後將支援單集／多集佇列、進度、暫停、恢復、取消、重試與本機播放。", 14f, muted).apply {
-                        setPadding(0, dp(12), 0, 0)
+                    content.addView(text("下载文件保存在应用私有目录。可在剧集详情加入单集或整剧队列；下载期间保持应用运行。", 14f, muted).apply {
+                        setPadding(0, 0, 0, dp(12))
                     })
+                    setting("打开下载管理") { showDownloadManager(it) }
+                    setting("查看下载目录位置") {
+                        tvTools.info("下载目录", getDir("downloads", Context.MODE_PRIVATE).absolutePath, it)
+                    }
                 }
                 4 -> {
                     lateinit var about: TextView
@@ -2858,6 +2878,14 @@ class MainActivity : Activity() {
             addButton(actions, "评论 · 第 ${episodeIndex+1} 集") { social.showComments(detailComments) }
         val secondary = row().apply { setPadding(0, dp(8), 0, 0) }
         info.addView(secondary)
+        addButton(secondary, "下载第 ${episodeIndex + 1} 集") {
+            downloadManager.enqueue(data.series.id, data.series.title, data.episodes[episodeIndex], episodeIndex + 1)
+            showDownloadManager(play)
+        }
+        addButton(secondary, "批量下载全部 ${data.episodes.size} 集") {
+            downloadManager.enqueueAll(data.series.id, data.series.title, data.episodes)
+            showDownloadManager(play)
+        }
         accountFavoriteButton =
             addButton(secondary, detailFavoriteLabel(data.series.id)) {
                 if (cloudAccount.signedIn) {
