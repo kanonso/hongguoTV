@@ -91,3 +91,17 @@ of this software.
 https://github.com/qq294716498/HongguoTV-Phone-TV-NoAds/tree/8eafa3908e9191c0a5ae186d5beff11e3a971f3c/native/core 。保留原 MIT/GPL 声明与许可；未引入该项目的应用界面或账号数据。
 
 `core/src/test/resources/player-signing.json` 使用该固定 Go 实现、固定时间和 nonce 独立生成，用于逐字节校验，不含真实设备身份、账号或媒体地址。正式播放优先使用 `/novel/player/video_model/v1/` 和完整 Gorgon/Argus/Ladon，旧批量签名仅保留为有界兼容回退；前述历史“无签名播放请求”说明不再描述当前主路径。
+
+
+## 2026-11-28 Android TV integration
+
+- Openhongguo Android SDK 0.4.1: https://github.com/beilunyang/openhongguo
+  Licensed under Apache License 2.0. The Android AAR is used as a separate dependency;
+  its upstream LICENSE and NOTICE files must be preserved in the distributed source and
+  applicable binary notices.
+- Jackotom Android TV/search/source/download integration reference:
+  https://github.com/jackotom/hongguo-drama
+  Upstream project license: GPL-3.0. The target project is GPL-3.0-only; any adapted
+  GPL-covered implementation must retain copyright and license notices and satisfy
+  corresponding source-offer/source-code obligations. The Android helper binary is not
+  present for Android TV and is explicitly marked unavailable rather than bundled.
