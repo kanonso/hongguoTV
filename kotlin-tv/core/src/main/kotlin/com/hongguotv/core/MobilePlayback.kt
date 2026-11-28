@@ -54,30 +54,55 @@ internal object MobilePlayback {
     /** The player GET also requires v5, including MD5(empty) rather than a zero body digest.
      * Wire profile verified against hongguo-drama 92df757 and hongguo-tv 9e7386f.
      */
-    fun videoTabRequest(id: String, device: Map<String, String>, host: String, now: Long,
-                        signing: MobilePlaybackSigner = signer): Request.Builder {
+    fun videoTabRequest(
+        id: String,
+        device: Map<String, String>,
+        host: String,
+        now: Long,
+        signing: MobilePlaybackSigner = signer,
+        strategyRoute: PlaybackStrategyRoute? = null,
+    ): Request.Builder {
         require(id.matches(Regex("[0-9]{1,30}")))
         RequestScope.ensureActive()
-        val values = query(device, signing.currentAppProtocol) + linkedMapOf(
+        val defaults = query(device, signing.currentAppProtocol) + linkedMapOf(
             "video_id" to id, "video_id_type" to "0", "device_level" to "1",
             "need_all_video_definition" to "1", "need_mp4_align" to "0", "use_os_player" to "0",
             "video_platform" to "1024", "source" to "0", "from_video_id" to "", "_rticket" to now.toString(),
         )
-        val url = "https://$host/reading/bookapi/video_tab/multi_video_model/v1/"
-            .toHttpUrl().newBuilder().apply { values.forEach { (k, v) -> addQueryParameter(k, v) } }.build()
-        val signed = signing.sign(url.toString(), ByteArray(0), device)
-        RequestScope.ensureActive()
-        return Request.Builder().url(signed.url).get()
-            .header("User-Agent", "com.phoenix.read/73932 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)")
-            .header("Accept", "application/json; charset=utf-8")
-            .header("Accept-Language", "zh-CN,zh;q=0.9")
-            .apply {
-                signed.headers.forEach { (k, v) -> header(k, v) }
-                // Empty bytes are signing input only: the GET has no body or POST headers.
-                removeHeader("x-ss-stub")
-                removeHeader("Content-Type")
-                removeHeader("Content-Encoding")
+        val values = strategyRoute?.mergeQueryValues(defaults) ?: defaults
+        val base = strategyRoute?.url ?: "https://$host/reading/bookapi/video_tab/multi_video_model/v1/"
+        val url = base.toHttpUrl().newBuilder().query(null)
+            .apply { values.forEach { (k, v) -> addQueryParameter(k, v) } }.build()
+        val signed = when (strategyRoute?.auth ?: "v5") {
+            "v5" -> signing.sign(url.toString(), ByteArray(0), device)
+            "player" -> {
+                val query = Signer.encode(values + ("_rticket" to now.toString()))
+                MobileSignedRequest(
+                    "$base?$query",
+                    PlayerSignature().headers(query, ByteArray(0), device.getValue("device_id"), now),
+                )
             }
+            "none" -> {
+                val query = Signer.encode(values + mapOf("ts" to (now / 1000L).toString(), "_rticket" to now.toString()))
+                MobileSignedRequest("$base?$query", emptyMap())
+            }
+            else -> throw IOException("策略签名族不受支持")
+        }
+        RequestScope.ensureActive()
+        val headers = linkedMapOf(
+            "User-Agent" to "com.phoenix.read/73932 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)",
+            "Accept" to "application/json; charset=utf-8",
+            "Accept-Language" to "zh-CN,zh;q=0.9",
+        )
+        strategyRoute?.applyHeaders(headers)
+        return Request.Builder().url(signed.url).get().apply {
+            headers.forEach { (key, value) -> header(key, value) }
+            signed.headers.forEach { (key, value) -> header(key, value) }
+            // Empty bytes are signing input only: the GET has no body or POST headers.
+            removeHeader("x-ss-stub")
+            removeHeader("Content-Type")
+            removeHeader("Content-Encoding")
+        }
     }
 
     fun ladder(
@@ -87,16 +112,19 @@ internal object MobilePlayback {
         signer: MobilePlaybackSigner,
         now: Long,
         host: String? = null,
+        strategyRoute: PlaybackStrategyRoute? = null,
     ): StreamLadder {
         require(id.matches(Regex("[0-9]{1,30}")))
         RequestScope.ensureActive()
         val currentApp = signer.currentAppProtocol
-        val query = query(device, currentApp) + ("_rticket" to now.toString())
+        val defaults = query(device, currentApp) + ("_rticket" to now.toString())
+        val queryValues = strategyRoute?.mergeQueryValues(defaults) ?: defaults
         val origin = host ?: if (currentApp) "reading.snssdk.com" else PRIMARY_MODEL_HOST
-        val endpoint = if (currentApp) "https://$origin/novel/player/multi_video_model/preload/v1"
+        val defaultEndpoint = if (currentApp) "https://$origin/novel/player/multi_video_model/preload/v1"
             else "https://$origin/novel/player/multi_video_model/player/v1"
-        val url = endpoint
-            .toHttpUrl().newBuilder().apply { query.forEach { (k,v) -> addQueryParameter(k,v) } }.build()
+        val endpoint = strategyRoute?.url ?: defaultEndpoint
+        val url = endpoint.toHttpUrl().newBuilder().query(null)
+            .apply { queryValues.forEach { (k, v) -> addQueryParameter(k, v) } }.build()
         // TV uses platform decoders, not the official app's bytevc2 decoder.
         // Keep the older protocol's level 1; the current App protocol uses the verified tier below.
         val payload = JSONObject("""{"biz_param":{"detail_page_version":0,"device_level":1,"disable_digg_stat":false,"disable_video_relate_book":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]},"dr_scene":"player"}""")
@@ -107,17 +135,37 @@ internal object MobilePlayback {
             payload.getJSONObject("biz_param").put("device_level", 4)
             payload.put("dr_scene", "preload")
         }
+        val bodyJson = strategyRoute?.applyBodyOverrides(payload.toString().toByteArray(Charsets.UTF_8))
+            ?.let { JSONObject(String(it, Charsets.UTF_8)) } ?: payload
         val output = ByteArrayOutputStream()
-        GZIPOutputStream(output).use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+        GZIPOutputStream(output).use { it.write(bodyJson.toString().toByteArray(Charsets.UTF_8)) }
         val bytes = output.toByteArray()
-        val request = Request.Builder().url(url)
-            .header("User-Agent", if (currentApp) System.getProperty("http.agent", "okhttp/4.12.0") else
-                "com.phoenix.read/73932 (Linux; U; Android 12; zh_CN_#Hans; PGT-AN10; Build/V417IR;tt-ok/3.12.13.20)")
-            .header("Accept", "application/json").header("Content-Encoding", "gzip")
-            .header("x-ss-stub", MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { "%02X".format(it) })
-        val signed = signer.sign(url.toString(), bytes, device)
-        request.url(signed.url)
-        signed.headers.forEach { (k,v) -> request.header(k,v) }
+        val auth = strategyRoute?.auth ?: "v5"
+        val signed = when (auth) {
+            "v5" -> signer.sign(url.toString(), bytes, device)
+            "player" -> {
+                val signedQuery = Signer.encode(queryValues + ("_rticket" to now.toString()))
+                MobileSignedRequest(
+                    "$endpoint?$signedQuery",
+                    PlayerSignature().headers(signedQuery, bytes, device.getValue("device_id"), now),
+                )
+            }
+            "none" -> {
+                val signedQuery = Signer.encode(queryValues + mapOf("ts" to (now / 1000L).toString(), "_rticket" to now.toString()))
+                MobileSignedRequest("$endpoint?$signedQuery", emptyMap())
+            }
+            else -> throw IOException("策略签名族不受支持")
+        }
+        val requestHeaders = linkedMapOf(
+            "User-Agent" to if (currentApp) System.getProperty("http.agent", "okhttp/4.12.0")
+                else "com.phoenix.read/73932 (Linux; U; Android 12; zh_CN_#Hans; PGT-AN10; Build/V417IR;tt-ok/3.12.13.20)",
+            "Accept" to "application/json",
+            "Content-Encoding" to "gzip",
+            "x-ss-stub" to MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { "%02X".format(it) },
+        )
+        strategyRoute?.applyHeaders(requestHeaders)
+        val request = Request.Builder().url(signed.url)
+        requestHeaders.forEach { (key, value) -> request.header(key, value) }
         RequestScope.ensureActive()
         request.post(bytes.toRequestBody("application/json; charset=utf-8".toMediaType()))
         val transport = http.newBuilder().cookieJar(CookieJar.NO_COOKIES).build()
