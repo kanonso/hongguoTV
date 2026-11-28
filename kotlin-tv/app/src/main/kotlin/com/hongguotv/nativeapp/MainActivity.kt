@@ -41,6 +41,9 @@ class MainActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newFixedThreadPool(3)
     private val repository = ContentRepository(playbackSession = PlaybackDeviceSession.shared)
+    private val openHongguoAdapter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        OpenHongguoAdapter(applicationContext)
+    }
     private val phoneCatalog by lazy {
         PhoneControlCatalog(library, cloudAccount) { series, progress ->
             // Save while the old detail still identifies the playing episode.
@@ -1375,7 +1378,7 @@ class MainActivity : Activity() {
                         when (requestTab) {
                             0 -> repository.home(requestPage, requestType)
                             2 -> repository.comicRanking(requestPage)
-                            else -> repository.searchAll(requestQuery, requestPage)
+                            else -> searchAllWithCommunity(requestQuery, requestPage)
                         }
                     result
                 },
@@ -1889,7 +1892,7 @@ class MainActivity : Activity() {
                         browser.append(emptyList(), false)
                     } else
                         work(
-                            { repository.searchAll(requestQuery, nextPage) },
+                            { searchAllWithCommunity(requestQuery, nextPage) },
                             { result ->
                                 if (continuousCatalog === browser) {
                                     val seen = catalog.mapTo(HashSet()) { it.id }
@@ -2499,6 +2502,23 @@ class MainActivity : Activity() {
         render(settingsGroup)
         parent.addView(text("↑↓ 选择  ·  → 进入选项  ·  ← 返回分类  ·  返回：分类 / 顶部导航", 12f, Color.rgb(112, 122, 140)).apply { setPadding(0, dp(12), 0, 0) })
         settingsRows.getOrNull(settingsPositions[settingsGroup].coerceAtMost(settingsRows.lastIndex))?.requestFocus()
+    }
+
+    /**
+     * Query the existing App + website search and the independent openhongguo anonymous SDK.
+     * If either provider fails, preserve the other provider's results and pagination.
+     */
+    private fun searchAllWithCommunity(query: String, requestedPage: Int): CatalogPage {
+        val primary = runCatching { repository.searchAll(query, requestedPage) }
+        val community = runCatching { openHongguoAdapter.search(query, requestedPage) }
+        if (primary.isFailure && community.isFailure) {
+            throw java.io.IOException("红果搜索来源暂时都不可用，请稍后重试", primary.exceptionOrNull())
+        }
+        return CatalogSearchMerge.merge(
+            primary.getOrElse { CatalogPage(emptyList(), false) },
+            community.getOrElse { CatalogPage(emptyList(), false) },
+            query,
+        )
     }
 
     private fun saveSearchDraft() {
