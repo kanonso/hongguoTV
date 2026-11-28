@@ -2514,21 +2514,35 @@ class MainActivity : Activity() {
                             row.addView(copy, lp(0, -2).apply { weight = 1f })
                             val state = if (!source.available) "Android 不可用" else if (id in enabled) "已啟用" else "已停用"
                             row.addView(text(state, 12f, if (source.available && id in enabled) TvStyle.primary else muted))
+                            fun sourceAction(label: String, active: Boolean, action: () -> Unit) {
+                                val control = Button(this).apply {
+                                    text = label
+                                    isAllCaps = false
+                                    isFocusable = true
+                                    isEnabled = active
+                                    textSize = 14f
+                                    minWidth = dp(46)
+                                    minHeight = dp(42)
+                                    setPadding(dp(8), 0, dp(8), 0)
+                                    focusStyle(this)
+                                    setOnClickListener(action)
+                                }
+                                row.addView(control, lp(-2, -2).apply { leftMargin = dp(4) })
+                            }
+                            sourceAction("↑", source.available && position > 0) {
+                                playbackSourceSettings.move(id, -1)
+                                refreshSources()
+                            }
+                            sourceAction("↓", source.available && position < order.lastIndex) {
+                                playbackSourceSettings.move(id, 1)
+                                refreshSources()
+                            }
+                            sourceAction(if (id in enabled) "停用" else "啟用", source.available) {
+                                playbackSourceSettings.setEnabled(id, id !in enabled)
+                                refreshSources()
+                            }
                             row.setOnClickListener {
-                                val actions = if (!source.available) listOf("查看移植狀態") else listOf(
-                                    if (id in enabled) "停用來源" else "啟用來源",
-                                    "上移",
-                                    "下移",
-                                )
-                                tvTools.choose(source.title, actions, row, { choice ->
-                                    when (actions[choice]) {
-                                        "停用來源" -> playbackSourceSettings.setEnabled(id, false)
-                                        "啟用來源" -> playbackSourceSettings.setEnabled(id, true)
-                                        "上移" -> playbackSourceSettings.move(id, -1)
-                                        "下移" -> playbackSourceSettings.move(id, 1)
-                                    }
-                                    refreshSources()
-                                }, selected = 0)
+                                tvTools.info(source.title, source.description, row)
                             }
                             content.addView(row, lp(-1, -2).apply { bottomMargin = dp(6) })
                             sourceRows += row
