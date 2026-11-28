@@ -395,6 +395,7 @@ internal class PlaybackStrategyPackManager(context: Context) {
     }
 
     companion object {
+        private const val PACK_FORMAT = 2
         const val CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
         private const val MAX_PACK_BYTES = 256 * 1024
         private const val MAX_ROUTE_FIELDS = 40
