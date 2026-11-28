@@ -7,14 +7,14 @@ import com.hongguotv.core.Rendition
 import com.hongguotv.core.Series
 import com.hongguotv.core.StreamLadder
 import dev.openhongguo.ClientOptions
+import dev.openhongguo.DiscoverOptions
+import dev.openhongguo.SeriesSummary as OpenHongguoSeriesSummary
 import dev.openhongguo.OpenhongguoClient
 import dev.openhongguo.SearchOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.io.IOException
-import java.text.Normalizer
-import java.util.Locale
 
 /**
  * Android adapter for the official Apache-2.0 openhongguo SDK.
@@ -78,19 +78,7 @@ internal class OpenHongguoAdapter(context: Context) {
         } catch (failure: Exception) {
             throw IOException("openhongguo 搜索暂不可用", failure)
         }
-        val items = result.items.mapNotNull { row ->
-            val id = row.id.trim()
-            val title = row.title.trim()
-            if (!id.matches(Regex("[0-9]{6,30}")) || title.isBlank()) return@mapNotNull null
-            Series(
-                id = id,
-                title = title,
-                cover = safeHttps(row.coverUrl),
-                description = row.description.trim(),
-                badge = if (row.episodeCount > 0) "共 ${row.episodeCount} 集" else "社区 SDK",
-                source = "openhongguo",
-            )
-        }.distinctBy { it.id }
+        val items = result.items.mapNotNull(::toCatalogSeries).distinctBy { it.id }
         val next = result.cursor.takeIf { result.hasMore && it.isNotBlank() }
         synchronized(cursorLock) {
             if (next != null) cursors[normalized to page] = next
@@ -99,6 +87,45 @@ internal class OpenHongguoAdapter(context: Context) {
         return CatalogPage(items, next != null)
     }
 
+    /** Browse the SDK public recommendation channel independently of Hongguo catalog. */
+    fun discover(page: Int): CatalogPage {
+        require(page in 1..100)
+        requireRuntime()
+        val key = "__openhongguo_discover__"
+        val cursor = synchronized(cursorLock) {
+            if (page == 1) {
+                cursors.keys.removeAll { it.first == key }
+                null
+            } else cursors[key to (page - 1)]
+        }
+        if (page > 1 && cursor.isNullOrBlank()) return CatalogPage(emptyList(), false)
+        val result = try {
+            runBlocking(Dispatchers.IO) { client.discover(DiscoverOptions(cursor = cursor)) }
+        } catch (failure: Exception) {
+            throw IOException("openhongguo 推荐目录暂不可用", failure)
+        }
+        val items = result.items.mapNotNull(::toCatalogSeries).distinctBy { it.id }
+        val next = result.cursor.takeIf { result.hasMore && it.isNotBlank() }
+        synchronized(cursorLock) {
+            if (next != null) cursors[key to page] = next
+            while (cursors.size > 300) cursors.remove(cursors.keys.first())
+        }
+        return CatalogPage(items, next != null)
+    }
+
+    private fun toCatalogSeries(row: OpenHongguoSeriesSummary): Series? {
+        val id = row.id.trim()
+        val title = row.title.trim()
+        if (!id.matches(Regex("[0-9]{6,30}")) || title.isBlank()) return null
+        return Series(
+            id = id,
+            title = title,
+            cover = safeHttps(row.coverUrl),
+            description = row.description.trim(),
+            badge = if (row.episodeCount > 0) "共 " + row.episodeCount + " 集" else "OpenHongguo",
+            source = "openhongguo",
+        )
+    }
     /** Fetch every playable episode in order. Cursor changes are checked to avoid a server loop. */
     fun listPlayableEpisodes(seriesId: String): List<Pair<Int, String>> {
         require(seriesId.matches(Regex("[0-9]{6,30}")))
@@ -130,23 +157,21 @@ internal class OpenHongguoAdapter(context: Context) {
         listPlayableEpisodes(seriesId).map { it.second }
 
     /**
-     * Safe cross-provider mapping for a Hongguo-native series: search openhongguo by the full
-     * displayed series title, require exactly one normalized exact-title match, then map the
-     * 1-based episode number from its own episode directory. Never reuse a Hongguo episode ID.
+     * Find exactly one normalized full-title match, then verify its complete playable directory
+     * against the count published by the original Hongguo card. This fails closed for season
+     * collisions, missing pages, unplayable gaps and truncated SDK data.
      */
-    fun resolvePlaybackBySeriesTitle(
+    fun listCompleteEpisodeDirectoryBySeriesTitle(
         seriesTitle: String,
-        episodeNumber: Int,
         expectedEpisodeCount: Int,
-    ): StreamLadder {
-        require(
-            seriesTitle.isNotBlank() && seriesTitle.length <= 200 &&
-                episodeNumber in 1..10000 && expectedEpisodeCount in 1..10000,
-        )
+    ): List<Pair<Int, String>> {
+        require(seriesTitle.isNotBlank() && seriesTitle.length <= 200)
+        require(expectedEpisodeCount in 1..10000)
         requireRuntime()
-        val target = normalizeTitle(seriesTitle)
+        val target = OpenHongguoDirectoryPolicy.normalizeTitle(seriesTitle)
         if (target.isBlank()) throw IOException("无法识别剧名，跳过 openhongguo 来源")
-        val candidates = linkedMapOf<String, String>()
+
+        val candidates = linkedMapOf<String, OpenHongguoSeriesSummary>()
         var cursor: String? = null
         val seenCursors = mutableSetOf<String>()
         var searchComplete = false
@@ -159,8 +184,9 @@ internal class OpenHongguoAdapter(context: Context) {
                 throw IOException("openhongguo 系列映射搜索暂不可用", failure)
             }
             page.items.forEach { row ->
-                if (row.id.matches(Regex("[0-9]{6,30}")) && normalizeTitle(row.title) == target)
-                    candidates[row.id] = row.title
+                if (row.id.matches(Regex("[0-9]{6,30}")) &&
+                    OpenHongguoDirectoryPolicy.normalizeTitle(row.title) == target
+                ) candidates[row.id] = row
             }
             if (!page.hasMore) {
                 searchComplete = true
@@ -170,31 +196,38 @@ internal class OpenHongguoAdapter(context: Context) {
                 throw IOException("openhongguo 系列映射分页游标异常，无法确认同名结果唯一")
             cursor = page.cursor
         }
-        if (!searchComplete) throw IOException("openhongguo 同名系列结果过多，无法确认映射唯一")
-        if (candidates.isEmpty()) throw IOException("openhongguo 没有找到同名剧集，安全跳过该来源")
-        val matches = candidates.keys.mapNotNull { seriesId ->
-            val completeEpisodes = listPlayableEpisodes(seriesId)
-            // The host catalogue exposes IDs but not explicit episode labels. Only map by index
-            // when the SDK's playable list is complete and numbered exactly 1..N for the same count.
-            val completeOrderedDirectory = completeEpisodes.size == expectedEpisodeCount &&
-                completeEpisodes.withIndex().all { (index, episode) -> episode.first == index + 1 }
-            if (!completeOrderedDirectory) null
-            else completeEpisodes.getOrNull(episodeNumber - 1)?.let { seriesId to it.second }
-        }
-        if (matches.size != 1) {
+        if (!searchComplete)
+            throw IOException("openhongguo 同名系列结果超过安全查询范围，无法确认映射唯一")
+        if (candidates.size != 1) {
             throw IOException(
-                if (matches.isEmpty()) "openhongguo 同名剧没有对应分集，安全跳过该来源"
-                else "openhongguo 找到多个同名分集，无法确认对应关系，安全跳过该来源",
+                if (candidates.isEmpty()) "openhongguo 没有找到完全同名剧集，安全跳过该来源"
+                else "openhongguo 找到多个完全同名剧集，无法确认季别，安全跳过该来源",
             )
         }
-        return resolvePlayback(matches.single().second)
+
+        val candidate = candidates.values.single()
+        if (candidate.episodeCount > 0 && candidate.episodeCount != expectedEpisodeCount)
+            throw IOException("openhongguo 总集数与红果目录不一致，安全跳过该来源")
+        val episodes = listPlayableEpisodes(candidate.id)
+        if (!OpenHongguoDirectoryPolicy.isCompleteDirectory(expectedEpisodeCount, episodes))
+            throw IOException("openhongguo 分集未形成完整连续目录，安全跳过该来源")
+        return episodes
     }
 
-    private fun normalizeTitle(value: String): String =
-        Normalizer.normalize(value, Normalizer.Form.NFKC)
-            .lowercase(Locale.ROOT)
-            .filter { it.isLetterOrDigit() }
-
+    /** Resolve one episode only after the cross-provider directory has passed all checks. */
+    fun resolvePlaybackBySeriesTitle(
+        seriesTitle: String,
+        episodeNumber: Int,
+        expectedEpisodeCount: Int,
+    ): StreamLadder {
+        require(episodeNumber in 1..expectedEpisodeCount)
+        val directory = listCompleteEpisodeDirectoryBySeriesTitle(seriesTitle, expectedEpisodeCount)
+        val episodeId = directory.getOrNull(episodeNumber - 1)
+            ?.takeIf { it.first == episodeNumber }
+            ?.second
+            ?: throw IOException("openhongguo 没有对应集数，安全跳过该来源")
+        return resolvePlayback(episodeId)
+    }
     /** Resolve the complete SDK media model without discarding HLS, DASH or the separate audio track. */
     fun resolveMedia(episodeId: String): OpenHongguoResolvedMedia {
         require(episodeId.matches(Regex("[0-9]{1,30}")))
