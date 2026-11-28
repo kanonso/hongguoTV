@@ -19,6 +19,56 @@ import java.security.spec.X509EncodedKeySpec
 import java.time.Instant
 import java.util.concurrent.TimeUnit
 
+/**
+ * Canonical JSON serializer for signed strategy payloads.
+ *
+ * Android's JSONObject.quote() escapes forward slashes (e.g. https:\/\/), while the
+ * publisher's canonical payload preserves '/'. The signature is checked over the raw bytes;
+ * this serializer then enforces the exact same deterministic representation without changing
+ * those bytes or weakening Ed25519 verification.
+ */
+internal fun canonicalStrategyJson(value: Any?): String = when (value) {
+    null, JSONObject.NULL -> "null"
+    is JSONObject -> {
+        val keys = value.keys().asSequence().toList().sorted()
+        keys.joinToString(prefix = "{", postfix = "}") { key ->
+            canonicalStrategyJsonString(key) + ":" + canonicalStrategyJson(value.opt(key))
+        }
+    }
+    is JSONArray -> (0 until value.length()).joinToString(prefix = "[", postfix = "]") {
+        canonicalStrategyJson(value.opt(it))
+    }
+    is String -> canonicalStrategyJsonString(value)
+    is Number -> JSONObject.numberToString(value)
+    is Boolean -> value.toString()
+    else -> throw IOException("策略包包含不支持的 JSON 值")
+}
+
+/** JSON string quoting which does not escape '/' and uses lowercase hex for control chars. */
+internal fun canonicalStrategyJsonString(value: String): String = buildString(value.length + 2) {
+    append('"')
+    value.forEach { char ->
+        when (char) {
+            '"' -> append("\\\"")
+            '\\' -> append("\\\\")
+            '\b' -> append("\\b")
+            '\u000C' -> append("\\f")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> {
+                if (char.code < 0x20) {
+                    append("\\u")
+                    append(char.code.toString(16).padStart(4, '0'))
+                } else {
+                    append(char)
+                }
+            }
+        }
+    }
+    append('"')
+}
+
 internal data class PlaybackStrategyStatus(
     val enabled: Boolean,
     val revision: Int,
@@ -275,7 +325,7 @@ internal class PlaybackStrategyPackManager(context: Context) {
         val payload = try { JSONObject(payloadText) } catch (problem: Exception) {
             throw IOException("策略包内容不是有效 JSON", problem)
         }
-        if (canonicalJson(payload) != payloadText) throw IOException("策略包 JSON 不是规范格式")
+        if (canonicalStrategyJson(payload) != payloadText) throw IOException("策略包 JSON 不是规范格式")
         if (payload.optString("keyId") != keyId || payload.optInt("format") != PACK_FORMAT ||
             payload.optString("id") != "hongguo-playback") throw IOException("策略包标识不一致")
         val revision = payload.optInt("revision", 0)
@@ -375,23 +425,6 @@ internal class PlaybackStrategyPackManager(context: Context) {
             output[name] = value.toString()
         }
         return output
-    }
-
-    private fun canonicalJson(value: Any?): String = when (value) {
-        null, JSONObject.NULL -> "null"
-        is JSONObject -> {
-            val keys = value.keys().asSequence().toList().sorted()
-            keys.joinToString(prefix = "{", postfix = "}") { key ->
-                JSONObject.quote(key) + ":" + canonicalJson(value.opt(key))
-            }
-        }
-        is JSONArray -> (0 until value.length()).joinToString(prefix = "[", postfix = "]") {
-            canonicalJson(value.opt(it))
-        }
-        is String -> JSONObject.quote(value)
-        is Number -> JSONObject.numberToString(value)
-        is Boolean -> value.toString()
-        else -> throw IOException("策略包包含不支持的 JSON 值")
     }
 
     companion object {
