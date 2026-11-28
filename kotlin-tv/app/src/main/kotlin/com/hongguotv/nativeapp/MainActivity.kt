@@ -2874,9 +2874,9 @@ class MainActivity : Activity() {
             val file = java.io.File(task.filePath)
             EditedMediaItem.Builder(MediaItem.fromUri(android.net.Uri.fromFile(file))).build()
         }
-        val sequence = EditedMediaItemSequence.withAudioAndVideoFrom(editedItems)
+        val sequence = EditedMediaItemSequence.Builder(editedItems).build()
         val composition = Composition.Builder(listOf(sequence)).build()
-        lateinit var progressDialog: AlertDialog
+        var progressDialog: AlertDialog? = null
         lateinit var transformer: Transformer
         val listener = object : Transformer.Listener {
             override fun onCompleted(composition: Composition, result: ExportResult) {
@@ -2884,7 +2884,7 @@ class MainActivity : Activity() {
                 activeSeasonMerge = null
                 activeSeasonMergePoll?.let(main::removeCallbacks)
                 activeSeasonMergePoll = null
-                if (progressDialog.isShowing) progressDialog.dismiss()
+                progressDialog?.takeIf { it.isShowing }?.dismiss()
                 Toast.makeText(this@MainActivity, "合并完成：${mergeable.size} 集", Toast.LENGTH_LONG).show()
                 runCatching {
                     val uri = androidx.core.content.FileProvider.getUriForFile(
@@ -2922,7 +2922,7 @@ class MainActivity : Activity() {
                 .build()
             activeSeasonMerge = transformer
             val omittedHls = completed.count { it.mediaFormat == "hls" }
-            progressDialog = AlertDialog.Builder(this)
+            val dialog = AlertDialog.Builder(this)
                 .setTitle("合并本季影片")
                 .setMessage(
                     "正在合并已完成的 ${mergeable.size} 集，输出为 H.264/AAC MP4。" +
@@ -2931,8 +2931,9 @@ class MainActivity : Activity() {
                 .setNegativeButton("取消合并", null)
                 .setCancelable(false)
                 .create()
-            progressDialog.setOnShowListener {
-                progressDialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
+            progressDialog = dialog
+            dialog.setOnShowListener {
+                dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
                     if (activeSeasonMerge === transformer) {
                         activeSeasonMerge = null
                         activeSeasonMergePoll?.let(main::removeCallbacks)
@@ -2940,19 +2941,19 @@ class MainActivity : Activity() {
                         transformer.cancel()
                         transformer.removeAllListeners()
                         output.delete()
-                        progressDialog.dismiss()
+                        dialog.dismiss()
                     }
                 }
             }
-            progressDialog.show()
+            dialog.show()
             transformer.start(composition, output.absolutePath)
             val progressHolder = ProgressHolder()
             val poll = object : Runnable {
                 override fun run() {
-                    if (activeSeasonMerge !== transformer || !progressDialog.isShowing) return
+                    if (activeSeasonMerge !== transformer || !dialog.isShowing) return
                     val state = transformer.getProgress(progressHolder)
                     if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
-                        progressDialog.setMessage(
+                        dialog.setMessage(
                             "合并中 ${progressHolder.progress}% · ${mergeable.size} 集\n" +
                                 "請保持應用在前景，低階裝置可能需要較長時間。",
                         )
@@ -2970,7 +2971,7 @@ class MainActivity : Activity() {
             activeSeasonMergePoll?.let(main::removeCallbacks)
             activeSeasonMergePoll = null
             output.delete()
-            if (::progressDialog.isInitialized && progressDialog.isShowing) progressDialog.dismiss()
+            progressDialog?.takeIf { it.isShowing }?.dismiss()
             tvTools.info("无法开始合并", failure.message.orEmpty().take(180), root)
         }
     }
