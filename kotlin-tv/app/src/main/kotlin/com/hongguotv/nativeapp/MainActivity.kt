@@ -43,7 +43,8 @@ class MainActivity : Activity() {
     private val repository = ContentRepository(playbackSession = PlaybackDeviceSession.shared)
     private val playbackSourceSettings by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { PlaybackSourceSettings(applicationContext) }
     private val downloadManagerDelegate = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        TvDownloadManager(this) { episodeId ->
+        TvDownloadManager(this) { episodeId, source ->
+            val selectedSources = if (source == "openhongguo") setOf("openhongguo") else playbackSourceSettings.enabled()
             openStream(
                 repository.http,
                 repository,
@@ -52,7 +53,7 @@ class MainActivity : Activity() {
                 CodecCapabilities::supports,
                 recentPlaybackSources,
                 sourceOrder = playbackSourceSettings.order(),
-                enabledSources = playbackSourceSettings.enabled(),
+                enabledSources = selectedSources,
                 openHongguoLadder = { openHongguoAdapter.resolvePlayback(episodeId) },
             ) { track -> track == null || CodecCapabilities.supports(track) }
                 ?: throw java.io.IOException("没有电视可播放的清晰度")
@@ -2841,7 +2842,7 @@ class MainActivity : Activity() {
         message(body, "正在加载剧集…")
         work(
             {
-                if (series.tags == "openhongguo") {
+                if (series.source == "openhongguo") {
                     Detail(series, openHongguoAdapter.listEpisodeIds(series.id))
                 } else repository.detail(series.id)
             },
@@ -3010,11 +3011,11 @@ class MainActivity : Activity() {
         val secondary = row().apply { setPadding(0, dp(8), 0, 0) }
         info.addView(secondary)
         addButton(secondary, "下载第 ${episodeIndex + 1} 集") {
-            downloadManager.enqueue(data.series.id, data.series.title, data.episodes[episodeIndex], episodeIndex + 1)
+            downloadManager.enqueue(data.series.id, data.series.title, data.episodes[episodeIndex], episodeIndex + 1, source = data.series.source)
             showDownloadManager(play)
         }
         addButton(secondary, "批量下载全部 ${data.episodes.size} 集") {
-            downloadManager.enqueueAll(data.series.id, data.series.title, data.episodes)
+            downloadManager.enqueueAll(data.series.id, data.series.title, data.episodes, source = data.series.source)
             showDownloadManager(play)
         }
         accountFavoriteButton =
