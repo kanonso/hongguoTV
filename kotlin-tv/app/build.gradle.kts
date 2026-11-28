@@ -97,6 +97,8 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     // Official Apache-2.0 Android SDK: isolated anonymous profile, search, episode and playback APIs.
     implementation("io.github.beilunyang:openhongguo:0.4.1")
+    // Ed25519 verification for project-signed source-policy envelopes on Android API 21+.
+    implementation("com.bloxbean.cardano:net-i2p-crypto-eddsa:0.3.1")
     if (legacyAudio) implementation(project(":decoder-ffmpeg"))
     implementation(project(":core")) { exclude(group = "org.json") }
     implementation("androidx.media3:media3-exoplayer:1.8.0")
