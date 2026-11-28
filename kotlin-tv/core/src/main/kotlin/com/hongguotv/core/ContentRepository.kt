@@ -275,6 +275,67 @@ constructor(
         }
     }
 
+    private fun strategyRoute(id: String): PlaybackStrategyRoute? =
+        playbackStrategy()?.routes?.firstOrNull { it.id == id }
+
+    private fun strategyRequest(
+        route: PlaybackStrategyRoute,
+        defaultUrl: String,
+        identity: PlaybackDeviceSession.Profile,
+        baseValues: Map<String, String>,
+        originalBody: ByteArray?,
+    ): Request.Builder {
+        val now = clock()
+        val profile = identity.values + mapOf(
+            "version_code" to "73932",
+            "manifest_version_code" to "73932",
+            "update_version_code" to "73932",
+            "pv_player" to "73932",
+            "version_name" to "7.3.9.32",
+        )
+        val values = route.mergeQueryValues(profile + baseValues)
+        val url = route.url ?: defaultUrl
+        val body = route.applyBodyOverrides(originalBody)
+        val builder = when (route.auth) {
+            "v5" -> {
+                val signed = identity.signer(clock, profile).signPlayback(
+                    url, values, body, now = now, field21 = route.field21,
+                )
+                signedRequest(signed.url, signed).apply {
+                    if (identity.cookie.isNotBlank()) header("Cookie", identity.cookie)
+                }
+            }
+            "player" -> {
+                val query = Signer.encode(values + ("_rticket" to now.toString()))
+                val signingHeaders = PlayerSignature().headers(
+                    query, body, identity.values.getValue("device_id"), now,
+                )
+                Request.Builder().url("$url?$query")
+                    .header("User-Agent", VendorConstants.VIDEO_UA)
+                    .header("Accept", "application/json; charset=utf-8")
+                    .header("Sdk-Version", "2")
+                    .header("X-XS-From-Web", "0")
+                    .apply { signingHeaders.forEach { (key, value) -> header(key, value) } }
+                    .apply { if (identity.cookie.isNotBlank()) header("Cookie", identity.cookie) }
+            }
+            "none" -> {
+                val query = Signer.encode(values + mapOf(
+                    "ts" to (now / 1000L).toString(),
+                    "_rticket" to now.toString(),
+                ))
+                Request.Builder().url("$url?$query")
+                    .header("User-Agent", VendorConstants.VIDEO_UA)
+                    .header("Accept", "application/json; charset=utf-8")
+            }
+            else -> throw IOException("策略签名族不受支持")
+        }
+        val requestHeaders = linkedMapOf<String, String>()
+        route.applyHeaders(requestHeaders)
+        requestHeaders.forEach { (key, value) -> builder.header(key, value) }
+        if (body != null) builder.post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+        return builder
+    }
+
     // 构造内容请求：站点 UA 与语言头在前，签名头按序覆盖；供 text() 与播放信息重试循环共用。
     private fun signedRequest(url: String, signed: Signer.Request?): Request.Builder {
         val request =
@@ -303,7 +364,9 @@ constructor(
         identity: PlaybackDeviceSession.Profile,
         extra: Map<String, String> = emptyMap(),
         body: ByteArray? = null,
+        route: PlaybackStrategyRoute? = null,
     ): Request.Builder {
+        if (route != null) return strategyRequest(route, base, identity, extra, body)
         val profile = identity.values + mapOf(
             "version_code" to "73932", "manifest_version_code" to "73932",
             "update_version_code" to "73932", "pv_player" to "73932",
