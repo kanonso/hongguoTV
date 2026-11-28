@@ -114,10 +114,12 @@ def release_including_draft(tag):
 
 # Explicit filenames prevent an old single-APK build from being published by accident.
 APK_VARIANTS = (
+    # The official OpenHongguo AAR bundles libgojni.so for these ABIs in both
+    # universal APKs. Android 6+ must omit only the FFmpeg decoder, not all JNI.
     ('', 'android5', {'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'}),
-    ('platform/', 'android6', set()),
-    ('platform/', 'android6-arm32-v7a', set()),
-    ('platform/', 'android6-arm64-v8a', set()),
+    ('platform/', 'android6', {'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'}),
+    ('platform/', 'android6-arm32-v7a', {'armeabi-v7a'}),
+    ('platform/', 'android6-arm64-v8a', {'arm64-v8a'}),
 )
 
 
@@ -132,13 +134,21 @@ def apk_filters(suffix):
     return [dict(filterType='ABI', value=abi)] if abi else []
 
 
-def validate_apk_abis(path, expected):
+def validate_apk_abis(path, expected, require_ffmpeg=True):
     with zipfile.ZipFile(path) as package:
         names = package.namelist()
         actual = {name.split('/')[1] for name in names if name.startswith('lib/') and name.endswith('.so')}
         require(actual == expected, f'{path.name}: APK ABI mismatch: {actual} != {expected}')
-        require({f'lib/{abi}/libffmpegJNI.so' for abi in expected} <= set(names),
-                f'{path.name}: missing Android 5 AAC native decoder')
+        ffmpeg_abis = {
+            name.split('/')[1] for name in names
+            if name.startswith('lib/') and name.endswith('/libffmpegJNI.so')
+        }
+        if require_ffmpeg:
+            require(ffmpeg_abis == expected,
+                    f'{path.name}: Android 5 FFmpeg decoder ABI mismatch: {ffmpeg_abis} != {expected}')
+        else:
+            require(not ffmpeg_abis,
+                    f'{path.name}: Android 6+ package must not include the FFmpeg decoder')
 
 
 def prepare_apks(version, code, sdk, out):
@@ -156,10 +166,11 @@ def prepare_apks(version, code, sdk, out):
                 'Mismatched current build output')
     # Check every package before copying any release assets or creating a draft.
     for path, _, abis in sources:
+        min_sdk = 21 if suffix == 'android5' else 23
         validate_apk(run(str(buildtools / 'aapt'), 'dump', 'badging', str(path)),
                      run(str(buildtools / 'apksigner'), 'verify', '--verbose', '--min-sdk-version',
-                         str(21 if abis else 23), '--print-certs', str(path)), version, code, 21 if abis else 23)
-        validate_apk_abis(path, abis)
+                         str(min_sdk), '--print-certs', str(path)), version, code, min_sdk)
+        validate_apk_abis(path, abis, require_ffmpeg=(suffix == 'android5'))
     apks = []
     for path, suffix, _ in sources:
         target = out / f'hongguotv-kotlin-{version}-{suffix}.apk'
